@@ -15,8 +15,15 @@ pub struct Renderer {
     entry: ash::Entry,
     instance: ash::Instance,
     device: ash::Device,
+    swapchain_loader: Swapchain,
 
     physical_device: vk::PhysicalDevice,
+    queue_family_index: u32,
+    present_queue: vk::Queue,
+
+    surface_loader: Surface,
+    surface: vk::SurfaceKHR,
+    swapchain: vk::SwapchainKHR,
 
     // Debug
     pub debug_utils: Option<DebugUtils>,
@@ -122,7 +129,7 @@ impl Renderer {
             // Physical device
             let surface = ash_window::create_surface(&entry, &instance, window, None).unwrap();
             let surface_loader = Surface::new(&entry, &instance);
-            // FIXME: Only selects for graphics queues
+            // FIXME: Only selects for graphics queues that also support the surface/present
             let (physical_device, queue_family_index) = instance
                 .enumerate_physical_devices()
                 .unwrap()
@@ -155,22 +162,48 @@ impl Renderer {
                 .unwrap();
 
             // Logical device
-            let queue_info = vk::DeviceQueueCreateInfo::builder()
+            let prios = [1.0];
+            let queue_info = [vk::DeviceQueueCreateInfo::builder()
                 .queue_family_index(queue_family_index as u32)
-                .queue_priorities(&[1.0])
-                .build();
+                .queue_priorities(&prios)
+                .build()];
 
+            let device_extensions = [Swapchain::name().as_ptr()];
             let device_features = vk::PhysicalDeviceFeatures::default();
 
             let device_create_info = vk::DeviceCreateInfo::builder()
-                .queue_create_infos(&[queue_info])
-                .enabled_extension_names(&[])
+                .queue_create_infos(&queue_info)
+                .enabled_extension_names(&device_extensions)
                 .enabled_features(&device_features);
+
+            let device = instance.create_device(physical_device, &device_create_info, None).unwrap();
+
+            // Queue
+            let present_queue = device.get_device_queue(queue_family_index as u32, 0);
+
+            // Swapchain
+            let capabilities = surface_loader.get_physical_device_surface_capabilities(physical_device, surface).unwrap();
+
+            let surface_formats = surface_loader.get_physical_device_surface_formats(physical_device, surface).unwrap();
+            let surface_format = surface_formats
+                .iter()
+                .map(|f| f.format == vk::Format::B8G8R8A8_SRGB && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
+                .next()
+                .unwrap();
+
+
+            let present_modes = surface_loader.get_physical_device_surface_present_modes(physical_device, surface).unwrap();
+
 
             Ok(Renderer {
                 entry,
                 instance,
+                device,
                 physical_device,
+                queue_family_index: queue_family_index as u32,
+                present_queue,
+                surface_loader,
+                surface,
                 debug_utils,
                 debug_messenger,
             })
@@ -183,9 +216,12 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
+            self.device.device_wait_idle().unwrap();
             if let Some(ref utils) = self.debug_utils {
                 utils.destroy_debug_utils_messenger(self.debug_messenger, None);
             }
+            self.device.destroy_device(None);
+            self.surface_loader.destroy_surface(self.surface, None);
             self.instance.destroy_instance(None);
         }
     }
