@@ -1,16 +1,24 @@
-use ash::extensions::ext::DebugUtils;
-use ash::version::{EntryV1_0, InstanceV1_0};
+use ash::extensions::{
+    ext::DebugUtils,
+    khr::{Surface, Swapchain},
+};
+use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
 use ash::vk;
 use ash_window;
 
-use std::ffi::CStr;
 use std::borrow::Cow;
+use std::ffi::CStr;
 
 use winit::window;
 
 pub struct Renderer {
     entry: ash::Entry,
     instance: ash::Instance,
+    device: ash::Device,
+
+    physical_device: vk::PhysicalDevice,
+
+    // Debug
     pub debug_utils: Option<DebugUtils>,
     debug_messenger: vk::DebugUtilsMessengerEXT,
 }
@@ -20,8 +28,8 @@ impl Renderer {
     pub fn new(window: &window::Window) -> Result<Renderer, &'static str> {
         let entry = ash::Entry::new().unwrap();
 
-        // Instance creation
         unsafe {
+            // Instance
             let app_name = to_cstr!("Triangle");
             let app_info = vk::ApplicationInfo::builder()
                 .application_name(app_name)
@@ -46,7 +54,7 @@ impl Renderer {
                 info!("Debug not available");
             };
 
-           let surface_extensions_raw = surface_extensions
+            let surface_extensions_raw = surface_extensions
                 .iter()
                 .map(|ext| ext.as_ptr())
                 .collect::<Vec<_>>();
@@ -58,21 +66,21 @@ impl Renderer {
             let validation_layers = to_cstr!("VK_LAYER_KHRONOS_validation");
             let enabled_layers = if supported_layers
                 .iter()
-                .any(|layer| CStr::from_ptr(layer.layer_name.as_ptr()) == validation_layers) {
-
-                    [to_cstr!("VK_LAYER_KHRONOS_validation")]
-                } else {
-
-                    [to_cstr!("")]
-            };
-
-            let enabled_layers_raw: Vec<_>= enabled_layers.iter().map(|layer| layer.as_ptr()).collect();
-/*
-            if enabled_layers.{
+                .any(|layer| CStr::from_ptr(layer.layer_name.as_ptr()) == validation_layers)
+            {
+                [to_cstr!("VK_LAYER_KHRONOS_validation")]
             } else {
-                return Err("Validation layers requested but are not supported");
+                [to_cstr!("")]
             };
-*/
+
+            let enabled_layers_raw: Vec<_> =
+                enabled_layers.iter().map(|layer| layer.as_ptr()).collect();
+            /*
+                        if enabled_layers.{
+                        } else {
+                            return Err("Validation layers requested but are not supported");
+                        };
+            */
             let mut create_info = vk::InstanceCreateInfo::builder()
                 .application_info(&app_info)
                 .enabled_extension_names(&surface_extensions_raw)
@@ -103,15 +111,69 @@ impl Renderer {
             if debug_enabled {
                 let utils = DebugUtils::new(&entry, &instance);
                 debug_messenger = utils
-                    .create_debug_utils_messenger(&debug_utils_messenger_info, None).unwrap();
+                    .create_debug_utils_messenger(&debug_utils_messenger_info, None)
+                    .unwrap();
                 debug_utils = Some(utils);
             } else {
                 debug_utils = None;
                 debug_messenger = vk::DebugUtilsMessengerEXT::null();
             }
 
+            // Physical device
+            let surface = ash_window::create_surface(&entry, &instance, window, None).unwrap();
+            let surface_loader = Surface::new(&entry, &instance);
+            // FIXME: Only selects for graphics queues
+            let (physical_device, queue_family_index) = instance
+                .enumerate_physical_devices()
+                .unwrap()
+                .iter()
+                .map(|device| {
+                    instance
+                        .get_physical_device_queue_family_properties(*device)
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, ref info)| {
+                            let supports_graphics_and_surface =
+                                info.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                                    && surface_loader
+                                        .get_physical_device_surface_support(
+                                            *device,
+                                            index as u32,
+                                            surface,
+                                        )
+                                        .unwrap();
+                            if supports_graphics_and_surface {
+                                Some((*device, index))
+                            } else {
+                                None
+                            }
+                        })
+                        .next()
+                })
+                .filter_map(|v| v)
+                .next()
+                .unwrap();
 
-            Ok(Renderer { entry, instance, debug_utils, debug_messenger })
+            // Logical device
+            let queue_info = vk::DeviceQueueCreateInfo::builder()
+                .queue_family_index(queue_family_index as u32)
+                .queue_priorities(&[1.0])
+                .build();
+
+            let device_features = vk::PhysicalDeviceFeatures::default();
+
+            let device_create_info = vk::DeviceCreateInfo::builder()
+                .queue_create_infos(&[queue_info])
+                .enabled_extension_names(&[])
+                .enabled_features(&device_features);
+
+            Ok(Renderer {
+                entry,
+                instance,
+                physical_device,
+                debug_utils,
+                debug_messenger,
+            })
         }
     }
 
