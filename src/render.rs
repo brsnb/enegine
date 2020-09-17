@@ -187,9 +187,10 @@ impl Renderer {
             let surface_formats = surface_loader.get_physical_device_surface_formats(physical_device, surface).unwrap();
             let surface_format = surface_formats
                 .iter()
-                .map(|f| f.format == vk::Format::B8G8R8A8_SRGB && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
+                .filter(|f| f.format == vk::Format::B8G8R8A8_SRGB && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
                 .next()
-                .unwrap();
+                .unwrap_or(&surface_formats[0]);
+
 
 
             let present_modes = surface_loader.get_physical_device_surface_present_modes(physical_device, surface).unwrap();
