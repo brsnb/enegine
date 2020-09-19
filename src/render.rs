@@ -21,7 +21,12 @@ pub struct Renderer {
     present_queue: vk::Queue,
 
     surface: vk::SurfaceKHR,
+    surface_format: vk::Format,
+    surface_extent: vk::Extent2D,
+
     swapchain: vk::SwapchainKHR,
+    present_images: Vec<vk::Image>,
+    present_image_views: Vec<vk::ImageView>,
 
     surface_loader: Surface,
     swapchain_loader: Swapchain,
@@ -190,7 +195,7 @@ impl Renderer {
                 .unwrap();
             // FIXME: Bad, reliant on window and doesn't have dpi scaling
             //        use surface_caps.min_image_height/width???
-            let swapchain_extent = match surface_caps.current_extent.width {
+            let surface_extent = match surface_caps.current_extent.width {
                 std::u32::MAX => vk::Extent2D {
                     width: window.inner_size().width,
                     height: window.inner_size().height,
@@ -229,7 +234,7 @@ impl Renderer {
                 .min_image_count(image_count)
                 .image_format(surface_format.format)
                 .image_color_space(surface_format.color_space)
-                .image_extent(swapchain_extent)
+                .image_extent(surface_extent)
                 .image_array_layers(1)
                 .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
                 .image_sharing_mode(vk::SharingMode::EXCLUSIVE) // FIXME: Only if present_queue == graphics queue
@@ -238,7 +243,35 @@ impl Renderer {
                 .present_mode(present_mode)
                 .clipped(true);
 
-            let swapchain = swapchain_loader.create_swapchain(&swapchain_create_info, None).unwrap();
+            let swapchain = swapchain_loader
+                .create_swapchain(&swapchain_create_info, None)
+                .unwrap();
+
+            let present_images = swapchain_loader.get_swapchain_images(swapchain).unwrap();
+
+            let present_image_views: Vec<vk::ImageView> = present_images
+                .iter()
+                .map(|i| {
+                    let image_view = vk::ImageViewCreateInfo::builder()
+                        .image(*i)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(surface_format.format)
+                        .components(vk::ComponentMapping {
+                            r: vk::ComponentSwizzle::R,
+                            g: vk::ComponentSwizzle::G,
+                            b: vk::ComponentSwizzle::B,
+                            a: vk::ComponentSwizzle::A,
+                        })
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        });
+                    device.create_image_view(&image_view, None).unwrap()
+                })
+                .collect();
 
             Ok(Renderer {
                 entry,
@@ -248,7 +281,11 @@ impl Renderer {
                 queue_family_index: queue_family_index as u32,
                 present_queue,
                 surface,
+                surface_format: surface_format.format,
+                surface_extent,
                 swapchain,
+                present_images,
+                present_image_views,
                 surface_loader,
                 swapchain_loader,
                 debug_utils,
@@ -267,7 +304,11 @@ impl Drop for Renderer {
             if let Some(ref utils) = self.debug_utils {
                 utils.destroy_debug_utils_messenger(self.debug_messenger, None);
             }
-            self.swapchain_loader.destroy_swapchain(self.swapchain, None);
+            for v in self.present_image_views {
+                self.device.destroy_image_view(v, None);
+            }
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
