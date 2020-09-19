@@ -15,15 +15,16 @@ pub struct Renderer {
     entry: ash::Entry,
     instance: ash::Instance,
     device: ash::Device,
-    swapchain_loader: Swapchain,
 
     physical_device: vk::PhysicalDevice,
     queue_family_index: u32,
     present_queue: vk::Queue,
 
-    surface_loader: Surface,
     surface: vk::SurfaceKHR,
     swapchain: vk::SwapchainKHR,
+
+    surface_loader: Surface,
+    swapchain_loader: Swapchain,
 
     // Debug
     pub debug_utils: Option<DebugUtils>,
@@ -176,25 +177,68 @@ impl Renderer {
                 .enabled_extension_names(&device_extensions)
                 .enabled_features(&device_features);
 
-            let device = instance.create_device(physical_device, &device_create_info, None).unwrap();
+            let device = instance
+                .create_device(physical_device, &device_create_info, None)
+                .unwrap();
 
             // Queue
             let present_queue = device.get_device_queue(queue_family_index as u32, 0);
 
             // Swapchain
-            let capabilities = surface_loader.get_physical_device_surface_capabilities(physical_device, surface).unwrap();
+            let surface_caps = surface_loader
+                .get_physical_device_surface_capabilities(physical_device, surface)
+                .unwrap();
+            // FIXME: Bad, reliant on window and doesn't have dpi scaling
+            //        use surface_caps.min_image_height/width???
+            let swapchain_extent = match surface_caps.current_extent.width {
+                std::u32::MAX => vk::Extent2D {
+                    width: window.inner_size().width,
+                    height: window.inner_size().height,
+                },
+                _ => surface_caps.current_extent,
+            };
 
-            let surface_formats = surface_loader.get_physical_device_surface_formats(physical_device, surface).unwrap();
-            let surface_format = surface_formats
+            let surface_formats = surface_loader
+                .get_physical_device_surface_formats(physical_device, surface)
+                .unwrap();
+            let surface_format = *surface_formats
                 .iter()
-                .filter(|f| f.format == vk::Format::B8G8R8A8_SRGB && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
-                .next()
+                .find(|&f| {
+                    f.format == vk::Format::B8G8R8A8_SRGB
+                        && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+                })
                 .unwrap_or(&surface_formats[0]);
 
+            let present_modes = surface_loader
+                .get_physical_device_surface_present_modes(physical_device, surface)
+                .unwrap();
+            let present_mode = *present_modes
+                .iter()
+                .find(|&&mode| mode == vk::PresentModeKHR::MAILBOX)
+                .unwrap_or(&vk::PresentModeKHR::FIFO);
 
+            let mut image_count = surface_caps.min_image_count + 1;
+            if surface_caps.max_image_count > 0 && image_count > surface_caps.max_image_count {
+                image_count = surface_caps.max_image_count;
+            };
 
-            let present_modes = surface_loader.get_physical_device_surface_present_modes(physical_device, surface).unwrap();
+            let swapchain_loader = Swapchain::new(&instance, &device);
 
+            let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
+                .surface(surface)
+                .min_image_count(image_count)
+                .image_format(surface_format.format)
+                .image_color_space(surface_format.color_space)
+                .image_extent(swapchain_extent)
+                .image_array_layers(1)
+                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                .image_sharing_mode(vk::SharingMode::EXCLUSIVE) // FIXME: Only if present_queue == graphics queue
+                .pre_transform(surface_caps.current_transform) // NOTE: Identity transform?
+                .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+                .present_mode(present_mode)
+                .clipped(true);
+
+            let swapchain = swapchain_loader.create_swapchain(&swapchain_create_info, None).unwrap();
 
             Ok(Renderer {
                 entry,
@@ -203,8 +247,10 @@ impl Renderer {
                 physical_device,
                 queue_family_index: queue_family_index as u32,
                 present_queue,
-                surface_loader,
                 surface,
+                swapchain,
+                surface_loader,
+                swapchain_loader,
                 debug_utils,
                 debug_messenger,
             })
@@ -221,8 +267,9 @@ impl Drop for Renderer {
             if let Some(ref utils) = self.debug_utils {
                 utils.destroy_debug_utils_messenger(self.debug_messenger, None);
             }
-            self.device.destroy_device(None);
+            self.swapchain_loader.destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
+            self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
     }
