@@ -3,11 +3,12 @@ use ash::extensions::{
     khr::{Surface, Swapchain},
 };
 use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
-use ash::vk;
+use ash::{util, vk};
 use ash_window;
 
 use std::borrow::Cow;
 use std::ffi::CStr;
+use std::io::Cursor;
 
 use winit::window;
 
@@ -30,6 +31,9 @@ pub struct Renderer {
 
     surface_loader: Surface,
     swapchain_loader: Swapchain,
+
+    render_pass: vk::RenderPass,
+    pipeline_layout: vk::PipelineLayout,
 
     // Debug
     pub debug_utils: Option<DebugUtils>,
@@ -273,6 +277,150 @@ impl Renderer {
                 })
                 .collect();
 
+            // Render pass
+            let renderpass_attachment = [vk::AttachmentDescription::builder()
+                .format(surface_format.format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .build()];
+
+            let color_attachment_ref = [vk::AttachmentReference::builder()
+                .attachment(0)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .build()];
+
+            let subpass = [vk::SubpassDescription::builder()
+                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                .color_attachments(&color_attachment_ref)
+                .build()];
+
+            let render_pass_info = vk::RenderPassCreateInfo::builder()
+                .attachments(&renderpass_attachment)
+                .subpasses(&subpass);
+
+            let render_pass = device.create_render_pass(&render_pass_info, None).unwrap();
+
+            // Shader modules
+            // FIXME
+            let (vs_spirv, fs_spirv) = {
+                let vs_source = include_str!("../shader/triangle/triangle.vert");
+                let fs_source = include_str!("../shader/triangle/triangle.frag");
+                let mut compiler = shaderc::Compiler::new().unwrap();
+                let vs_spirv = compiler
+                    .compile_into_spirv(
+                        vs_source,
+                        shaderc::ShaderKind::Vertex,
+                        "triangle.vert",
+                        "main",
+                        None,
+                    )
+                    .unwrap();
+                let fs_spirv = compiler
+                    .compile_into_spirv(
+                        fs_source,
+                        shaderc::ShaderKind::Fragment,
+                        "triangle.frag",
+                        "main",
+                        None,
+                    )
+                    .unwrap();
+                (vs_spirv, fs_spirv)
+            };
+
+            let (vs_spirv_bytes, fs_spirv_bytes) =
+                (vs_spirv.as_binary_u8(), fs_spirv.as_binary_u8());
+
+            let vs_code = util::read_spv(&mut Cursor::new(vs_spirv_bytes)).unwrap();
+            let vs_module_info = vk::ShaderModuleCreateInfo::builder().code(&vs_code);
+            let vs_module = device.create_shader_module(&vs_module_info, None).unwrap();
+
+            let fs_code = util::read_spv(&mut Cursor::new(fs_spirv_bytes)).unwrap();
+            let fs_module_info = vk::ShaderModuleCreateInfo::builder().code(&fs_code);
+            let fs_module = device.create_shader_module(&fs_module_info, None).unwrap();
+
+            // Shader entry
+            let vs_entry = vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vs_module)
+                .name(to_cstr!("main"));
+            let fs_entry = vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(fs_module)
+                .name(to_cstr!("main"));
+
+            device.destroy_shader_module(vs_module, None);
+            device.destroy_shader_module(fs_module, None);
+
+            // Fixed function
+            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::builder()
+                .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+                .primitive_restart_enable(false);
+
+            let viewport = vk::Viewport::builder()
+                .x(0.0)
+                .y(0.0)
+                .width(surface_extent.width as f32) // FIXME: Swapchain image size vs surface
+                .height(surface_extent.height as f32)
+                .min_depth(0.0)
+                .max_depth(1.0)
+                .build();
+
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: surface_extent,
+            };
+
+            let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
+                .viewport_count(1)
+                .viewports(&[viewport])
+                .scissor_count(1)
+                .scissors(&[scissor]);
+
+            let rasterizer_info = vk::PipelineRasterizationStateCreateInfo::builder()
+                .depth_clamp_enable(false)
+                .rasterizer_discard_enable(false)
+                .polygon_mode(vk::PolygonMode::FILL)
+                .line_width(1.0)
+                .cull_mode(vk::CullModeFlags::BACK)
+                .front_face(vk::FrontFace::CLOCKWISE) // FIXME: Make CCW
+                .depth_bias_enable(false);
+
+            let multisample_info = vk::PipelineMultisampleStateCreateInfo::builder()
+                .sample_shading_enable(false)
+                .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+            let color_blend_attachment = [vk::PipelineColorBlendAttachmentState::builder()
+                .color_write_mask(
+                    vk::ColorComponentFlags::R
+                        | vk::ColorComponentFlags::G
+                        | vk::ColorComponentFlags::B
+                        | vk::ColorComponentFlags::A,
+                )
+                .blend_enable(false)
+                .src_color_blend_factor(vk::BlendFactor::ONE)
+                .dst_color_blend_factor(vk::BlendFactor::ZERO)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+                .alpha_blend_op(vk::BlendOp::ADD)
+                .build()];
+
+            let color_blend_info = vk::PipelineColorBlendStateCreateInfo::builder()
+                .logic_op_enable(false)
+                .attachments(&color_blend_attachment);
+
+            // Pipeline
+            let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
+            let pipeline_layout = device
+                .create_pipeline_layout(&pipeline_layout_info, None)
+                .unwrap();
+
             Ok(Renderer {
                 entry,
                 instance,
@@ -288,6 +436,8 @@ impl Renderer {
                 present_image_views,
                 surface_loader,
                 swapchain_loader,
+                render_pass,
+                pipeline_layout,
                 debug_utils,
                 debug_messenger,
             })
@@ -304,12 +454,15 @@ impl Drop for Renderer {
             if let Some(ref utils) = self.debug_utils {
                 utils.destroy_debug_utils_messenger(self.debug_messenger, None);
             }
-            for v in self.present_image_views {
+            for &v in self.present_image_views.iter() {
                 self.device.destroy_image_view(v, None);
             }
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.destroy_render_pass(self.render_pass, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
