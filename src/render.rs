@@ -347,11 +347,13 @@ impl Renderer {
             let vs_entry = vk::PipelineShaderStageCreateInfo::builder()
                 .stage(vk::ShaderStageFlags::VERTEX)
                 .module(vs_module)
-                .name(to_cstr!("main"));
+                .name(to_cstr!("main"))
+                .build();
             let fs_entry = vk::PipelineShaderStageCreateInfo::builder()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
                 .module(fs_module)
-                .name(to_cstr!("main"));
+                .name(to_cstr!("main"))
+                .build();
 
             device.destroy_shader_module(vs_module, None);
             device.destroy_shader_module(fs_module, None);
@@ -362,25 +364,25 @@ impl Renderer {
                 .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
                 .primitive_restart_enable(false);
 
-            let viewport = vk::Viewport::builder()
+            let viewport = [vk::Viewport::builder()
                 .x(0.0)
                 .y(0.0)
                 .width(surface_extent.width as f32) // FIXME: Swapchain image size vs surface
                 .height(surface_extent.height as f32)
                 .min_depth(0.0)
                 .max_depth(1.0)
-                .build();
+                .build()];
 
-            let scissor = vk::Rect2D {
+            let scissor = [vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent: surface_extent,
-            };
+            }];
 
             let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
                 .viewport_count(1)
-                .viewports(&[viewport])
+                .viewports(&viewport)
                 .scissor_count(1)
-                .scissors(&[scissor]);
+                .scissors(&scissor);
 
             let rasterizer_info = vk::PipelineRasterizationStateCreateInfo::builder()
                 .depth_clamp_enable(false)
@@ -420,6 +422,25 @@ impl Renderer {
             let pipeline_layout = device
                 .create_pipeline_layout(&pipeline_layout_info, None)
                 .unwrap();
+
+            let pipeline_info = [vk::GraphicsPipelineCreateInfo::builder()
+                .stages(&[vs_entry, fs_entry])
+                .vertex_input_state(&vertex_input)
+                .input_assembly_state(&input_assembly)
+                .viewport_state(&viewport_state)
+                .rasterization_state(&rasterizer_info)
+                .multisample_state(&multisample_info)
+                .color_blend_state(&color_blend_info)
+                .layout(pipeline_layout)
+                .render_pass(render_pass)
+                .subpass(0)
+                .build()];
+
+            let pipeline = device.create_graphics_pipelines(
+                vk::PipelineCache::null(),
+                &pipeline_info,
+                None,
+            );
 
             Ok(Renderer {
                 entry,
