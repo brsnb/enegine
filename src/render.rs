@@ -34,6 +34,8 @@ pub struct Renderer {
 
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
+    graphics_pipeline: vk::Pipeline,
+    framebuffers: Vec<vk::Framebuffer>,
 
     // Debug
     pub debug_utils: Option<DebugUtils>,
@@ -355,9 +357,6 @@ impl Renderer {
                 .name(to_cstr!("main"))
                 .build();
 
-            device.destroy_shader_module(vs_module, None);
-            device.destroy_shader_module(fs_module, None);
-
             // Fixed function
             let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
             let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::builder()
@@ -436,11 +435,27 @@ impl Renderer {
                 .subpass(0)
                 .build()];
 
-            let pipeline = device.create_graphics_pipelines(
-                vk::PipelineCache::null(),
-                &pipeline_info,
-                None,
-            );
+            let graphics_pipeline = device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
+                .unwrap();
+
+            device.destroy_shader_module(vs_module, None);
+            device.destroy_shader_module(fs_module, None);
+
+            // Framebuffer
+            let mut framebuffers = Vec::with_capacity(present_image_views.len());
+
+            for (i, &view) in present_image_views.iter().enumerate() {
+                let view = [view];
+                let framebuffer_info = vk::FramebufferCreateInfo::builder()
+                    .render_pass(render_pass)
+                    .attachments(&view)
+                    .width(surface_extent.width)
+                    .height(surface_extent.height)
+                    .layers(1);
+
+                framebuffers.push(device.create_framebuffer(&framebuffer_info, None).unwrap());
+            }
 
             Ok(Renderer {
                 entry,
@@ -459,6 +474,8 @@ impl Renderer {
                 swapchain_loader,
                 render_pass,
                 pipeline_layout,
+                graphics_pipeline: graphics_pipeline[0], // FIXME
+                framebuffers,
                 debug_utils,
                 debug_messenger,
             })
@@ -472,6 +489,9 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+            for f in self.framebuffers.iter() {
+                self.device.destroy_framebuffer(*f, None);
+            }
             if let Some(ref utils) = self.debug_utils {
                 utils.destroy_debug_utils_messenger(self.debug_messenger, None);
             }
@@ -481,6 +501,7 @@ impl Drop for Renderer {
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
+            self.device.destroy_pipeline(self.graphics_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device.destroy_render_pass(self.render_pass, None);
