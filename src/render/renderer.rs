@@ -10,7 +10,14 @@ use std::borrow::Cow;
 use std::ffi::CStr;
 use std::io::Cursor;
 
-use winit::window;
+pub struct Window {
+    window: winit::window::Window,
+    surface_loader: Surface,
+    surface: vk::SurfaceKHR,
+    swapchain_loader: Swapchain,
+    swapchain: vk::SwapchainKHR,
+    swapchain_images: Vec<vk::Image>,
+}
 
 pub struct Renderer {
     entry: ash::Entry,
@@ -58,7 +65,7 @@ impl Renderer {
 
         unsafe {
             // Instance
-            let app_name = to_cstr!("Triangle");
+            let app_name = to_cstr!("enegine");
             let app_info = vk::ApplicationInfo::builder()
                 .application_name(app_name)
                 .application_version(0)
@@ -575,6 +582,12 @@ impl Renderer {
                 debug_utils,
                 debug_messenger,
             })
+        }
+    }
+
+    pub fn recreate_swapchain(&mut self) {
+        unsafe {
+            self.device.device_wait_idle().unwrap();
         }
     }
 

@@ -1,9 +1,8 @@
 [package]
 name = "enegine"
 version = "0.1.0"
-authors = ["brsnb <49287229+brsnb@users.noreply.github.com>"]
 edition = "2018"
-
+authors = ["brsnb <49287229+brsnb@users.noreply.github.com>"]
 
 [dependencies]
 ash = "0.31"

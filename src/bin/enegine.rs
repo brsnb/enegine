@@ -11,7 +11,7 @@ fn main() {
 
     let event_loop = EventLoop::new();
     let window = window::WindowBuilder::new()
-        .with_title("Triangle")
+        .with_title("enegine")
         .build(&event_loop)
         .unwrap();
 
