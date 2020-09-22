@@ -37,6 +37,15 @@ pub struct Renderer {
     graphics_pipeline: vk::Pipeline,
     framebuffers: Vec<vk::Framebuffer>,
 
+    command_pool: vk::CommandPool,
+    command_buffers: Vec<vk::CommandBuffer>,
+
+    frames_in_flight: usize,
+    current_frame: usize,
+    in_flight_fences: Vec<vk::Fence>,
+    image_available_sems: Vec<vk::Semaphore>,
+    render_finished_sems: Vec<vk::Semaphore>,
+
     // Debug
     pub debug_utils: Option<DebugUtils>,
     debug_messenger: vk::DebugUtilsMessengerEXT,
@@ -109,8 +118,7 @@ impl Renderer {
                 .message_severity(
                     vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
                         | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                        | vk::DebugUtilsMessageSeverityFlagsEXT::INFO
-                        | vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE,
+                        | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
                 )
                 .message_type(
                     vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
@@ -301,9 +309,18 @@ impl Renderer {
                 .color_attachments(&color_attachment_ref)
                 .build()];
 
+            let dependency = [vk::SubpassDependency::builder()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .build()];
+
             let render_pass_info = vk::RenderPassCreateInfo::builder()
                 .attachments(&renderpass_attachment)
-                .subpasses(&subpass);
+                .subpasses(&subpass)
+                .dependencies(&dependency);
 
             let render_pass = device.create_render_pass(&render_pass_info, None).unwrap();
 
@@ -445,7 +462,7 @@ impl Renderer {
             // Framebuffer
             let mut framebuffers = Vec::with_capacity(present_image_views.len());
 
-            for (i, &view) in present_image_views.iter().enumerate() {
+            for &view in present_image_views.iter() {
                 let view = [view];
                 let framebuffer_info = vk::FramebufferCreateInfo::builder()
                     .render_pass(render_pass)
@@ -455,6 +472,78 @@ impl Renderer {
                     .layers(1);
 
                 framebuffers.push(device.create_framebuffer(&framebuffer_info, None).unwrap());
+            }
+
+            // Command buffers
+            let cmd_pool_info =
+                vk::CommandPoolCreateInfo::builder().queue_family_index(queue_family_index as u32);
+
+            let command_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
+
+            // One buffer for each framebuffer
+            let buf_alloc_info = vk::CommandBufferAllocateInfo::builder()
+                .command_pool(command_pool)
+                .command_buffer_count(present_image_views.len() as u32)
+                .level(vk::CommandBufferLevel::PRIMARY);
+
+            let command_buffers = device.allocate_command_buffers(&buf_alloc_info).unwrap();
+
+            for (i, buffer) in command_buffers.iter().enumerate() {
+                let buf_begin_info = vk::CommandBufferBeginInfo::default();
+                device
+                    .begin_command_buffer(*buffer, &buf_begin_info)
+                    .unwrap();
+
+                let clear_values = [vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 1.0],
+                    },
+                }];
+
+                let render_begin_info = vk::RenderPassBeginInfo::builder()
+                    .render_pass(render_pass)
+                    .framebuffer(framebuffers[i])
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent: surface_extent,
+                    })
+                    .clear_values(&clear_values);
+
+                device.cmd_begin_render_pass(
+                    *buffer,
+                    &render_begin_info,
+                    vk::SubpassContents::INLINE,
+                );
+
+                device.cmd_bind_pipeline(
+                    *buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    graphics_pipeline[0],
+                ); // FIXME: graphics_pipeline
+
+                device.cmd_draw(*buffer, 3, 1, 0, 0);
+
+                device.cmd_end_render_pass(*buffer);
+
+                device.end_command_buffer(*buffer).unwrap();
+            }
+
+            let frames_in_flight = 2;
+
+            let semaphore_info = vk::SemaphoreCreateInfo::default();
+            let mut image_available_sems = Vec::with_capacity(frames_in_flight);
+            let mut render_finished_sems = Vec::with_capacity(frames_in_flight);
+            for _ in 0..frames_in_flight {
+                image_available_sems.push(device.create_semaphore(&semaphore_info, None).unwrap());
+            }
+            for _ in 0..frames_in_flight {
+                render_finished_sems.push(device.create_semaphore(&semaphore_info, None).unwrap());
+            }
+
+            let fence_info = vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
+            let mut in_flight_fences = Vec::with_capacity(frames_in_flight);
+            for _ in 0..frames_in_flight {
+                in_flight_fences.push(device.create_fence(&fence_info, None).unwrap());
             }
 
             Ok(Renderer {
@@ -476,19 +565,82 @@ impl Renderer {
                 pipeline_layout,
                 graphics_pipeline: graphics_pipeline[0], // FIXME
                 framebuffers,
+                command_pool,
+                command_buffers,
+                frames_in_flight,
+                current_frame: 0,
+                in_flight_fences,
+                image_available_sems,
+                render_finished_sems,
                 debug_utils,
                 debug_messenger,
             })
         }
     }
 
-    pub fn render(&mut self) {}
+    pub fn render(&mut self) {
+        unsafe {
+            let fences = vec![self.in_flight_fences[self.current_frame]];
+            self.device.wait_for_fences(&fences, true, std::u64::MAX).unwrap();
+            self.device.reset_fences(&fences).unwrap();
+            let (image_index, _) = self
+                .swapchain_loader
+                .acquire_next_image(
+                    self.swapchain,
+                    std::u64::MAX,
+                    self.image_available_sems[self.current_frame],
+                    vk::Fence::null(),
+                )
+                .unwrap();
+
+            let wait_semaphores = [self.image_available_sems[self.current_frame]];
+            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let signal_semaphores = [self.render_finished_sems[self.current_frame]];
+            let command_buffer = [self.command_buffers[image_index as usize]];
+            let submit_info = vk::SubmitInfo::builder()
+                .wait_semaphores(&wait_semaphores)
+                .wait_dst_stage_mask(&wait_stages)
+                .command_buffers(&command_buffer)
+                .signal_semaphores(&signal_semaphores);
+
+            self.device
+                .queue_submit(
+                    self.present_queue,
+                    &[submit_info.build()],
+                    self.in_flight_fences[self.current_frame],
+                )
+                .unwrap();
+
+            let swapchains = vec![self.swapchain];
+            let indices = [image_index];
+            let present_info = vk::PresentInfoKHR::builder()
+                .wait_semaphores(&signal_semaphores)
+                .swapchains(&swapchains)
+                .image_indices(&indices);
+
+            self.swapchain_loader
+                .queue_present(self.present_queue, &present_info)
+                .unwrap();
+        }
+
+        self.current_frame = (self.current_frame + 1) % self.frames_in_flight;
+    }
 }
 
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+            self.device.destroy_command_pool(self.command_pool, None);
+            for s in self.image_available_sems.iter() {
+                self.device.destroy_semaphore(*s, None);
+            }
+            for s in self.render_finished_sems.iter() {
+                self.device.destroy_semaphore(*s, None);
+            }
+            for f in self.in_flight_fences.iter() {
+                self.device.destroy_fence(*f, None);
+            }
             for f in self.framebuffers.iter() {
                 self.device.destroy_framebuffer(*f, None);
             }
