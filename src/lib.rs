@@ -13,8 +13,6 @@ macro_rules! to_cstr {
 pub mod render;
 
 
-
-
 #[cfg(test)]
 mod tests {
     #[test]

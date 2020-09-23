@@ -10,13 +10,10 @@ use std::borrow::Cow;
 use std::ffi::CStr;
 use std::io::Cursor;
 
-pub struct Window {
-    window: winit::window::Window,
-    surface_loader: Surface,
-    surface: vk::SurfaceKHR,
-    swapchain_loader: Swapchain,
-    swapchain: vk::SwapchainKHR,
-    swapchain_images: Vec<vk::Image>,
+pub struct Context {
+    entry: ash::Entry,
+    instance: ash::Instance,
+    device: ash::Device,
 }
 
 pub struct Renderer {
@@ -29,8 +26,9 @@ pub struct Renderer {
     present_queue: vk::Queue,
 
     surface: vk::SurfaceKHR,
-    surface_format: vk::Format,
+    surface_format: vk::SurfaceFormatKHR,
     surface_extent: vk::Extent2D,
+    present_mode: vk::PresentModeKHR,
 
     swapchain: vk::SwapchainKHR,
     present_images: Vec<vk::Image>,
@@ -334,8 +332,8 @@ impl Renderer {
             // Shader modules
             // FIXME
             let (vs_spirv, fs_spirv) = {
-                let vs_source = include_str!("../shader/triangle/triangle.vert");
-                let fs_source = include_str!("../shader/triangle/triangle.frag");
+                let vs_source = include_str!("../bin/shader/triangle/triangle.vert");
+                let fs_source = include_str!("../bin/shader/triangle/triangle.frag");
                 let mut compiler = shaderc::Compiler::new().unwrap();
                 let vs_spirv = compiler
                     .compile_into_spirv(
@@ -401,6 +399,9 @@ impl Renderer {
                 extent: surface_extent,
             }];
 
+            let dynamic_state = vk::PipelineDynamicStateCreateInfo::builder()
+                .dynamic_states(&[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]);
+
             let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
                 .viewport_count(1)
                 .viewports(&viewport)
@@ -450,7 +451,8 @@ impl Renderer {
                 .stages(&[vs_entry, fs_entry])
                 .vertex_input_state(&vertex_input)
                 .input_assembly_state(&input_assembly)
-                .viewport_state(&viewport_state)
+                .dynamic_state(&dynamic_state)
+                //.viewport_state(&viewport_state)
                 .rasterization_state(&rasterizer_info)
                 .multisample_state(&multisample_info)
                 .color_blend_state(&color_blend_info)
@@ -528,6 +530,10 @@ impl Renderer {
                     graphics_pipeline[0],
                 ); // FIXME: graphics_pipeline
 
+                // Dynamic state
+                device.cmd_set_viewport(*buffer, 0, &viewport);
+                device.cmd_set_scissor(*buffer, 0, &scissor);
+
                 device.cmd_draw(*buffer, 3, 1, 0, 0);
 
                 device.cmd_end_render_pass(*buffer);
@@ -561,8 +567,9 @@ impl Renderer {
                 queue_family_index: queue_family_index as u32,
                 present_queue,
                 surface,
-                surface_format: surface_format.format,
+                surface_format,
                 surface_extent,
+                present_mode,
                 swapchain,
                 present_images,
                 present_image_views,
@@ -585,9 +592,53 @@ impl Renderer {
         }
     }
 
+    // FIXME: Sus
     pub fn recreate_swapchain(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+            let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
+                .surface(self.surface)
+                .min_image_count(self.present_images.len() as u32) //FIXME: Sus
+                .image_format(self.surface_format.format)
+                .image_color_space(self.surface_format.color_space)
+                .image_extent(self.surface_extent)
+                .image_array_layers(1)
+                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                .image_sharing_mode(vk::SharingMode::EXCLUSIVE) // FIXME: Only if present_queue == graphics queue
+                .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY) // NOTE: Identity transform?
+                .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+                .present_mode(self.present_mode)
+                .clipped(true);
+
+            let swapchain = self.swapchain_loader
+                .create_swapchain(&swapchain_create_info, None)
+                .unwrap();
+
+            let present_images = self.swapchain_loader.get_swapchain_images(swapchain).unwrap();
+
+            let present_image_views: Vec<vk::ImageView> = present_images
+                .iter()
+                .map(|i| {
+                    let image_view = vk::ImageViewCreateInfo::builder()
+                        .image(*i)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(self.surface_format.format)
+                        .components(vk::ComponentMapping {
+                            r: vk::ComponentSwizzle::R,
+                            g: vk::ComponentSwizzle::G,
+                            b: vk::ComponentSwizzle::B,
+                            a: vk::ComponentSwizzle::A,
+                        })
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        });
+                    self.device.create_image_view(&image_view, None).unwrap()
+                })
+                .collect();
         }
     }
 
