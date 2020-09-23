@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate log;
 
-use enegine::render;
+use enegine::render::renderer;
 
 use winit::{event_loop::EventLoop, window};
 
@@ -15,7 +15,7 @@ fn main() {
         .build(&event_loop)
         .unwrap();
 
-    let mut renderer = render::Renderer::new(&window).unwrap();
+    let mut renderer = renderer::Renderer::new(&window).unwrap();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = winit::event_loop::ControlFlow::Poll;

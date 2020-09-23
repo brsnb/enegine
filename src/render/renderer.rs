@@ -10,12 +10,6 @@ use std::borrow::Cow;
 use std::ffi::CStr;
 use std::io::Cursor;
 
-pub struct Context {
-    entry: ash::Entry,
-    instance: ash::Instance,
-    device: ash::Device,
-}
-
 pub struct Renderer {
     entry: ash::Entry,
     instance: ash::Instance,
@@ -58,7 +52,7 @@ pub struct Renderer {
 
 impl Renderer {
     // TODO: Don't really need window here, just required exts
-    pub fn new(window: &window::Window) -> Result<Renderer, &'static str> {
+    pub fn new(window: &winit::window::Window) -> Result<Renderer, &'static str> {
         let entry = ash::Entry::new().unwrap();
 
         unsafe {
@@ -452,7 +446,7 @@ impl Renderer {
                 .vertex_input_state(&vertex_input)
                 .input_assembly_state(&input_assembly)
                 .dynamic_state(&dynamic_state)
-                //.viewport_state(&viewport_state)
+                .viewport_state(&viewport_state)
                 .rasterization_state(&rasterizer_info)
                 .multisample_state(&multisample_info)
                 .color_blend_state(&color_blend_info)
@@ -596,6 +590,21 @@ impl Renderer {
     pub fn recreate_swapchain(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+            self.cleanup_swapchain();
+
+            let surface_caps = self
+                .surface_loader
+                .get_physical_device_surface_capabilities(self.physical_device, self.surface)
+                .unwrap();
+
+            self.surface_extent = match surface_caps.current_extent.width {
+                std::u32::MAX => vk::Extent2D { // FIXME: Awful
+                    width: 800,
+                    height: 600,
+                },
+                _ => surface_caps.current_extent,
+            };
+
             let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
                 .surface(self.surface)
                 .min_image_count(self.present_images.len() as u32) //FIXME: Sus
@@ -610,13 +619,18 @@ impl Renderer {
                 .present_mode(self.present_mode)
                 .clipped(true);
 
-            let swapchain = self.swapchain_loader
+            self.swapchain = self
+                .swapchain_loader
                 .create_swapchain(&swapchain_create_info, None)
                 .unwrap();
 
-            let present_images = self.swapchain_loader.get_swapchain_images(swapchain).unwrap();
+            self.present_images = self
+                .swapchain_loader
+                .get_swapchain_images(self.swapchain)
+                .unwrap();
 
-            let present_image_views: Vec<vk::ImageView> = present_images
+            self.present_image_views = self
+                .present_images
                 .iter()
                 .map(|i| {
                     let image_view = vk::ImageViewCreateInfo::builder()
@@ -639,15 +653,121 @@ impl Renderer {
                     self.device.create_image_view(&image_view, None).unwrap()
                 })
                 .collect();
+
+            // Framebuffer
+            self.framebuffers = Vec::with_capacity(self.present_image_views.len());
+
+            for &view in self.present_image_views.iter() {
+                let view = [view];
+                let framebuffer_info = vk::FramebufferCreateInfo::builder()
+                    .render_pass(self.render_pass)
+                    .attachments(&view)
+                    .width(self.surface_extent.width)
+                    .height(self.surface_extent.height)
+                    .layers(1);
+
+                self.framebuffers.push(
+                    self.device
+                        .create_framebuffer(&framebuffer_info, None)
+                        .unwrap(),
+                );
+            }
+
+            // One buffer for each framebuffer
+            let buf_alloc_info = vk::CommandBufferAllocateInfo::builder()
+                .command_pool(self.command_pool)
+                .command_buffer_count(self.present_image_views.len() as u32)
+                .level(vk::CommandBufferLevel::PRIMARY);
+
+            self.command_buffers = self
+                .device
+                .allocate_command_buffers(&buf_alloc_info)
+                .unwrap();
+
+            for (i, buffer) in self.command_buffers.iter().enumerate() {
+                let buf_begin_info = vk::CommandBufferBeginInfo::default();
+                self.device
+                    .begin_command_buffer(*buffer, &buf_begin_info)
+                    .unwrap();
+
+                let clear_values = [vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 1.0],
+                    },
+                }];
+
+                let render_begin_info = vk::RenderPassBeginInfo::builder()
+                    .render_pass(self.render_pass)
+                    .framebuffer(self.framebuffers[i])
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent: self.surface_extent,
+                    })
+                    .clear_values(&clear_values);
+
+                self.device.cmd_begin_render_pass(
+                    *buffer,
+                    &render_begin_info,
+                    vk::SubpassContents::INLINE,
+                );
+
+                self.device.cmd_bind_pipeline(
+                    *buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.graphics_pipeline,
+                );
+
+                let viewport = [vk::Viewport::builder()
+                    .x(0.0)
+                    .y(0.0)
+                    .width(self.surface_extent.width as f32) // FIXME: Swapchain image size vs surface
+                    .height(self.surface_extent.height as f32)
+                    .min_depth(0.0)
+                    .max_depth(1.0)
+                    .build()];
+
+                let scissor = [vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: self.surface_extent,
+                }];
+
+                // Dynamic state
+                self.device.cmd_set_viewport(*buffer, 0, &viewport);
+                self.device.cmd_set_scissor(*buffer, 0, &scissor);
+
+                self.device.cmd_draw(*buffer, 3, 1, 0, 0);
+
+                self.device.cmd_end_render_pass(*buffer);
+
+                self.device.end_command_buffer(*buffer).unwrap();
+            }
+        }
+    }
+
+    // FIXME: Also sus
+    fn cleanup_swapchain(&mut self) {
+        unsafe {
+            for f in self.framebuffers.iter() {
+                self.device.destroy_framebuffer(*f, None);
+            }
+            self.device
+                .free_command_buffers(self.command_pool, &self.command_buffers);
+            for i in self.present_image_views.iter() {
+                self.device.destroy_image_view(*i, None);
+            }
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
         }
     }
 
     pub fn render(&mut self) {
         unsafe {
             let fences = vec![self.in_flight_fences[self.current_frame]];
-            self.device.wait_for_fences(&fences, true, std::u64::MAX).unwrap();
+            self.device
+                .wait_for_fences(&fences, true, std::u64::MAX)
+                .unwrap();
             self.device.reset_fences(&fences).unwrap();
-            let (image_index, _) = self
+            let (image_index, mut is_suboptimal) = self
                 .swapchain_loader
                 .acquire_next_image(
                     self.swapchain,
@@ -655,7 +775,11 @@ impl Renderer {
                     self.image_available_sems[self.current_frame],
                     vk::Fence::null(),
                 )
-                .unwrap();
+                .unwrap_or((0, true)); //FIXME: Bad
+            if is_suboptimal {
+                self.recreate_swapchain();
+                return;
+            }
 
             let wait_semaphores = [self.image_available_sems[self.current_frame]];
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -682,9 +806,14 @@ impl Renderer {
                 .swapchains(&swapchains)
                 .image_indices(&indices);
 
-            self.swapchain_loader
+            is_suboptimal = self
+                .swapchain_loader
                 .queue_present(self.present_queue, &present_info)
-                .unwrap();
+                .unwrap_or(true); //FIXME: Bad
+
+            if is_suboptimal {
+                self.recreate_swapchain();
+            }
         }
 
         self.current_frame = (self.current_frame + 1) % self.frames_in_flight;
