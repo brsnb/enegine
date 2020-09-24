@@ -37,8 +37,9 @@ fn main() {
                     info!("Exit requested via keypress");
                     *control_flow = winit::event_loop::ControlFlow::Exit;
                 }
-                winit::event::WindowEvent::Resized(dims) => {
+                winit::event::WindowEvent::Resized(_dims) => {
                     // TODO: Recreate swapchain
+                    renderer.should_recreate_swapchain = true;
                 }
                 _ => {}
             },

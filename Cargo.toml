@@ -8,6 +8,7 @@ authors = ["brsnb <49287229+brsnb@users.noreply.github.com>"]
 ash = "0.31"
 ash-window = "0.4"
 env_logger = "0.7"
+glam = "0.9"
 log = "0.4"
 shaderc = "0.6"
 winit = "0.22"

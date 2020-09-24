@@ -10,6 +10,13 @@ use std::borrow::Cow;
 use std::ffi::CStr;
 use std::io::Cursor;
 
+use glam::{Vec2, Vec3};
+
+pub struct Vertex {
+    pub position: Vec2,
+    pub color: Vec3,
+}
+
 pub struct Renderer {
     entry: ash::Entry,
     instance: ash::Instance,
@@ -27,6 +34,7 @@ pub struct Renderer {
     swapchain: vk::SwapchainKHR,
     present_images: Vec<vk::Image>,
     present_image_views: Vec<vk::ImageView>,
+    pub should_recreate_swapchain: bool,
 
     surface_loader: Surface,
     swapchain_loader: Swapchain,
@@ -53,6 +61,21 @@ pub struct Renderer {
 impl Renderer {
     // TODO: Don't really need window here, just required exts
     pub fn new(window: &winit::window::Window) -> Result<Renderer, &'static str> {
+        let vertices: Vec<Vertex> = vec![
+            Vertex {
+                position: Vec2::new(0.0, -0.5),
+                color: Vec3::new(1.0, 0.0, 0.0),
+            },
+            Vertex {
+                position: Vec2::new(0.5, 0.5),
+                color: Vec3::new(0.0, 1.0, 0.0),
+            },
+            Vertex {
+                position: Vec2::new(-0.5, 0.5),
+                color: Vec3::new(0.0, 0.0, 1.0),
+            },
+        ];
+
         let entry = ash::Entry::new().unwrap();
 
         unsafe {
@@ -567,6 +590,7 @@ impl Renderer {
                 swapchain,
                 present_images,
                 present_image_views,
+                should_recreate_swapchain: false,
                 surface_loader,
                 swapchain_loader,
                 render_pass,
@@ -598,10 +622,13 @@ impl Renderer {
                 .unwrap();
 
             self.surface_extent = match surface_caps.current_extent.width {
-                std::u32::MAX => vk::Extent2D { // FIXME: Awful
-                    width: 800,
-                    height: 600,
-                },
+                std::u32::MAX => {
+                    vk::Extent2D {
+                        // FIXME: Awful
+                        width: 800,
+                        height: 600,
+                    }
+                }
                 _ => surface_caps.current_extent,
             };
 
@@ -777,7 +804,6 @@ impl Renderer {
                 )
                 .unwrap_or((0, true)); //FIXME: Bad
             if is_suboptimal {
-                self.recreate_swapchain();
                 return;
             }
 
@@ -811,7 +837,8 @@ impl Renderer {
                 .queue_present(self.present_queue, &present_info)
                 .unwrap_or(true); //FIXME: Bad
 
-            if is_suboptimal {
+            if is_suboptimal || self.should_recreate_swapchain {
+                self.should_recreate_swapchain = false;
                 self.recreate_swapchain();
             }
         }
