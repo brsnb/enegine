@@ -47,6 +47,7 @@ pub struct Renderer {
 
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
+    vertex_buffer: vk::Buffer,
 
     frames_in_flight: usize,
     current_frame: usize,
@@ -405,18 +406,22 @@ impl Renderer {
                 ..Default::default()
             }];
 
-            let vertex_input_attributes = [vk::VertexInputAttributeDescription {
-                binding: 0,
-                location: 0,
-                format: vk::Format::R32G32_SFLOAT,
-                offset: offset_of!(Vertex, position) as u32,
-                ..Default::default()
-            },
-            vk::VertexInputAttributeDescription {
-                binding: 0,
-                location: 1,
-                format: vk::Format::R32G32B32_SFLOAT
-            }];
+            let vertex_input_attributes = [
+                vk::VertexInputAttributeDescription {
+                    binding: 0,
+                    location: 0,
+                    format: vk::Format::R32G32_SFLOAT,
+                    offset: offset_of!(Vertex, position) as u32,
+                    ..Default::default()
+                },
+                vk::VertexInputAttributeDescription {
+                    binding: 0,
+                    location: 1,
+                    format: vk::Format::R32G32B32_SFLOAT,
+                    offset: offset_of!(Vertex, color) as u32,
+                    ..Default::default()
+                },
+            ];
 
             let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::builder()
                 .vertex_binding_descriptions(&vertex_input_bindings)
@@ -491,7 +496,7 @@ impl Renderer {
 
             let pipeline_info = [vk::GraphicsPipelineCreateInfo::builder()
                 .stages(&[vs_entry, fs_entry])
-                .vertex_input_state(&vertex_input)
+                .vertex_input_state(&vertex_input_state)
                 .input_assembly_state(&input_assembly)
                 .dynamic_state(&dynamic_state)
                 .viewport_state(&viewport_state)
@@ -523,6 +528,27 @@ impl Renderer {
                     .layers(1);
 
                 framebuffers.push(device.create_framebuffer(&framebuffer_info, None).unwrap());
+            }
+
+            // Vertex buffer
+            let vertex_buffer_info = vk::BufferCreateInfo::builder()
+                .size((mem::size_of::<Vertex>() * vertices.len()) as u64)
+                .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+            let vertex_buffer = device.create_buffer(&vertex_buffer_info, None).unwrap();
+
+            let mem_requirements = device.get_buffer_memory_requirements(vertex_buffer);
+            let mem_properties = instance.get_physical_device_memory_properties(physical_device);
+
+            for i in 0..mem_properties.memory_type_count {
+                if (mem_requirements.memory_type_bits & (1 << i)) == 0
+                    && (mem_properties.memory_types[i as usize].property_flags
+                        & vk::MemoryPropertyFlags::HOST_VISIBLE
+                        | vk::MemoryPropertyFlags::HOST_COHERENT)
+                        == vk::MemoryPropertyFlags::HOST_VISIBLE
+                            | vk::MemoryPropertyFlags::HOST_COHERENT
+                {}
             }
 
             // Command buffers
@@ -624,6 +650,7 @@ impl Renderer {
                 framebuffers,
                 command_pool,
                 command_buffers,
+                vertex_buffer,
                 frames_in_flight,
                 current_frame: 0,
                 in_flight_fences,
@@ -876,6 +903,7 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+            self.device.destroy_buffer(self.vertex_buffer, None);
             self.device.destroy_command_pool(self.command_pool, None);
             for s in self.image_available_sems.iter() {
                 self.device.destroy_semaphore(*s, None);
