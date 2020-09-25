@@ -9,6 +9,7 @@ use ash_window;
 use std::borrow::Cow;
 use std::ffi::CStr;
 use std::io::Cursor;
+use std::mem;
 
 use glam::{Vec2, Vec3};
 
@@ -396,8 +397,32 @@ impl Renderer {
                 .name(to_cstr!("main"))
                 .build();
 
+            // Vertex input/attrib
+            let vertex_input_bindings = [vk::VertexInputBindingDescription {
+                binding: 0,
+                stride: mem::size_of::<Vertex>() as u32,
+                input_rate: vk::VertexInputRate::VERTEX,
+                ..Default::default()
+            }];
+
+            let vertex_input_attributes = [vk::VertexInputAttributeDescription {
+                binding: 0,
+                location: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: offset_of!(Vertex, position) as u32,
+                ..Default::default()
+            },
+            vk::VertexInputAttributeDescription {
+                binding: 0,
+                location: 1,
+                format: vk::Format::R32G32B32_SFLOAT
+            }];
+
+            let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::builder()
+                .vertex_binding_descriptions(&vertex_input_bindings)
+                .vertex_attribute_descriptions(&vertex_input_attributes);
+
             // Fixed function
-            let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
             let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::builder()
                 .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
                 .primitive_restart_enable(false);
