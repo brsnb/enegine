@@ -13,6 +13,7 @@ use std::mem;
 
 use glam::{Vec2, Vec3};
 
+#[derive(Clone, Copy, Debug)]
 pub struct Vertex {
     pub position: Vec2,
     pub color: Vec3,
@@ -48,6 +49,7 @@ pub struct Renderer {
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
     vertex_buffer: vk::Buffer,
+    vertex_buffer_mem: vk::DeviceMemory,
 
     frames_in_flight: usize,
     current_frame: usize,
@@ -531,25 +533,35 @@ impl Renderer {
             }
 
             // Vertex buffer
-            let vertex_buffer_info = vk::BufferCreateInfo::builder()
-                .size((mem::size_of::<Vertex>() * vertices.len()) as u64)
-                .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            //let staging_buffer = Renderer::create_buffer(device, size, mem_props, usage, props)
 
-            let vertex_buffer = device.create_buffer(&vertex_buffer_info, None).unwrap();
-
-            let mem_requirements = device.get_buffer_memory_requirements(vertex_buffer);
             let mem_properties = instance.get_physical_device_memory_properties(physical_device);
 
-            for i in 0..mem_properties.memory_type_count {
-                if (mem_requirements.memory_type_bits & (1 << i)) == 0
-                    && (mem_properties.memory_types[i as usize].property_flags
-                        & vk::MemoryPropertyFlags::HOST_VISIBLE
-                        | vk::MemoryPropertyFlags::HOST_COHERENT)
-                        == vk::MemoryPropertyFlags::HOST_VISIBLE
-                            | vk::MemoryPropertyFlags::HOST_COHERENT
-                {}
-            }
+            let vertex_buffer_size = (mem::size_of::<Vertex>() * vertices.len()) as u64;
+            let (vertex_buffer, vertex_buffer_mem) = Renderer::create_buffer(
+                &device,
+                vertex_buffer_size,
+                mem_properties,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            ).unwrap();
+
+           let data = device
+                .map_memory(
+                    vertex_buffer_mem,
+                    0,
+                    vertex_buffer_size,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .unwrap();
+
+            let mut align = ash::util::Align::new(
+                data,
+                mem::align_of::<Vertex>() as u64,
+                vertex_buffer_size,
+            );
+            align.copy_from_slice(&vertices);
+            device.unmap_memory(vertex_buffer_mem);
 
             // Command buffers
             let cmd_pool_info =
@@ -598,11 +610,16 @@ impl Renderer {
                     graphics_pipeline[0],
                 ); // FIXME: graphics_pipeline
 
+                // bind vertex buffer
+                let vertex_buffers = vec![vertex_buffer];
+                let offsets = vec![0];
+                device.cmd_bind_vertex_buffers(*buffer, 0, &vertex_buffers, &offsets);
+
                 // Dynamic state
                 device.cmd_set_viewport(*buffer, 0, &viewport);
                 device.cmd_set_scissor(*buffer, 0, &scissor);
 
-                device.cmd_draw(*buffer, 3, 1, 0, 0);
+                device.cmd_draw(*buffer, vertices.len() as u32, 1, 0, 0);
 
                 device.cmd_end_render_pass(*buffer);
 
@@ -651,6 +668,7 @@ impl Renderer {
                 command_pool,
                 command_buffers,
                 vertex_buffer,
+                vertex_buffer_mem,
                 frames_in_flight,
                 current_frame: 0,
                 in_flight_fences,
@@ -662,8 +680,55 @@ impl Renderer {
         }
     }
 
+    // TODO: At least unwrap_or()
+    //       Something like this is a good candidate for a Context struct
+    fn create_buffer(
+        device: &ash::Device,
+        size: vk::DeviceSize,
+        physical_props: vk::PhysicalDeviceMemoryProperties,
+        usage: vk::BufferUsageFlags,
+        props: vk::MemoryPropertyFlags,
+    ) -> Option<(vk::Buffer, vk::DeviceMemory)> {
+        unsafe {
+            let create_info = vk::BufferCreateInfo::builder()
+                .size(size)
+                .usage(usage)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+            let buffer = device.create_buffer(&create_info, None).unwrap();
+
+            let mem_requirements = device.get_buffer_memory_requirements(buffer);
+
+            let alloc_info = vk::MemoryAllocateInfo::builder()
+                .allocation_size(mem_requirements.size)
+                .memory_type_index(
+                    find_memorytype_index(&mem_requirements, &physical_props, props).unwrap(),
+                );
+
+            let buffer_mem = device.allocate_memory(&alloc_info, None).unwrap();
+
+            device.bind_buffer_memory(buffer, buffer_mem, 0).unwrap();
+
+            Some((buffer, buffer_mem))
+        }
+    }
+
     // FIXME: Sus
     pub fn recreate_swapchain(&mut self) {
+        let vertices: Vec<Vertex> = vec![
+            Vertex {
+                position: Vec2::new(0.0, -0.5),
+                color: Vec3::new(1.0, 0.0, 0.0),
+            },
+            Vertex {
+                position: Vec2::new(0.5, 0.5),
+                color: Vec3::new(0.0, 1.0, 0.0),
+            },
+            Vertex {
+                position: Vec2::new(-0.5, 0.5),
+                color: Vec3::new(0.0, 0.0, 1.0),
+            },
+        ];
         unsafe {
             self.device.device_wait_idle().unwrap();
             self.cleanup_swapchain();
@@ -796,6 +861,12 @@ impl Renderer {
                     self.graphics_pipeline,
                 );
 
+                // bind vertex buffer
+                let vertex_buffers = vec![self.vertex_buffer];
+                let offsets = vec![0];
+                self.device
+                    .cmd_bind_vertex_buffers(*buffer, 0, &vertex_buffers, &offsets);
+
                 let viewport = [vk::Viewport::builder()
                     .x(0.0)
                     .y(0.0)
@@ -814,7 +885,8 @@ impl Renderer {
                 self.device.cmd_set_viewport(*buffer, 0, &viewport);
                 self.device.cmd_set_scissor(*buffer, 0, &scissor);
 
-                self.device.cmd_draw(*buffer, 3, 1, 0, 0);
+                self.device
+                    .cmd_draw(*buffer, vertices.len() as u32, 1, 0, 0);
 
                 self.device.cmd_end_render_pass(*buffer);
 
@@ -904,6 +976,7 @@ impl Drop for Renderer {
         unsafe {
             self.device.device_wait_idle().unwrap();
             self.device.destroy_buffer(self.vertex_buffer, None);
+            self.device.free_memory(self.vertex_buffer_mem, None);
             self.device.destroy_command_pool(self.command_pool, None);
             for s in self.image_available_sems.iter() {
                 self.device.destroy_semaphore(*s, None);
@@ -934,6 +1007,41 @@ impl Drop for Renderer {
             self.instance.destroy_instance(None);
         }
     }
+}
+
+pub fn find_memorytype_index(
+    memory_req: &vk::MemoryRequirements,
+    memory_prop: &vk::PhysicalDeviceMemoryProperties,
+    flags: vk::MemoryPropertyFlags,
+) -> Option<u32> {
+    // Try to find an exactly matching memory flag
+    let best_suitable_index =
+        find_memorytype_index_f(memory_req, memory_prop, flags, |property_flags, flags| {
+            property_flags == flags
+        });
+    if best_suitable_index.is_some() {
+        return best_suitable_index;
+    }
+    // Otherwise find a memory flag that works
+    find_memorytype_index_f(memory_req, memory_prop, flags, |property_flags, flags| {
+        property_flags & flags == flags
+    })
+}
+
+pub fn find_memorytype_index_f<F: Fn(vk::MemoryPropertyFlags, vk::MemoryPropertyFlags) -> bool>(
+    memory_req: &vk::MemoryRequirements,
+    memory_prop: &vk::PhysicalDeviceMemoryProperties,
+    flags: vk::MemoryPropertyFlags,
+    f: F,
+) -> Option<u32> {
+    let mut memory_type_bits = memory_req.memory_type_bits;
+    for (index, ref memory_type) in memory_prop.memory_types.iter().enumerate() {
+        if memory_type_bits & 1 == 1 && f(memory_type.property_flags, flags) {
+            return Some(index as u32);
+        }
+        memory_type_bits >>= 1;
+    }
+    None
 }
 
 unsafe extern "system" fn vulkan_debug_callback(
