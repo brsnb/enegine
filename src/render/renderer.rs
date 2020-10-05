@@ -50,6 +50,8 @@ pub struct Renderer {
     command_buffers: Vec<vk::CommandBuffer>,
     vertex_buffer: vk::Buffer,
     vertex_buffer_mem: vk::DeviceMemory,
+    index_buffer: vk::Buffer,
+    index_buffer_mem: vk::DeviceMemory,
 
     frames_in_flight: usize,
     current_frame: usize,
@@ -67,18 +69,24 @@ impl Renderer {
     pub fn new(window: &winit::window::Window) -> Result<Renderer, &'static str> {
         let vertices: Vec<Vertex> = vec![
             Vertex {
-                position: Vec2::new(0.0, -0.5),
-                color: Vec3::new(1.0, 0.0, 0.0),
+                position: Vec2::new(-0.5, -0.5),
+                color: Vec3::new(1.0, 0.0, 0.0)
             },
             Vertex {
-                position: Vec2::new(0.5, 0.5),
+                position: Vec2::new(0.5, -0.5),
                 color: Vec3::new(0.0, 1.0, 0.0),
             },
             Vertex {
-                position: Vec2::new(-0.5, 0.5),
+                position: Vec2::new(0.5, 0.5),
                 color: Vec3::new(0.0, 0.0, 1.0),
             },
+            Vertex {
+                position: Vec2::new(-0.5, 0.5),
+                color: Vec3::new(1.0, 1.0, 1.0),
+            },
         ];
+
+        let indices: [u16; 6] = [0, 1, 2, 2, 3, 0];
 
         let entry = ash::Entry::new().unwrap();
 
@@ -533,35 +541,90 @@ impl Renderer {
             }
 
             // Vertex buffer
-            //let staging_buffer = Renderer::create_buffer(device, size, mem_props, usage, props)
-
             let mem_properties = instance.get_physical_device_memory_properties(physical_device);
 
-            let vertex_buffer_size = (mem::size_of::<Vertex>() * vertices.len()) as u64;
-            let (vertex_buffer, vertex_buffer_mem) = Renderer::create_buffer(
-                &device,
-                vertex_buffer_size,
-                mem_properties,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            ).unwrap();
+            let buffer_size = (mem::size_of::<Vertex>() * vertices.len()) as u64;
 
-           let data = device
+            let (staging_buffer, staging_buffer_mem) = Renderer::create_buffer(
+                &device,
+                buffer_size,
+                mem_properties,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .unwrap();
+
+            let data = device
                 .map_memory(
-                    vertex_buffer_mem,
+                    staging_buffer_mem,
                     0,
-                    vertex_buffer_size,
+                    buffer_size,
                     vk::MemoryMapFlags::empty(),
                 )
                 .unwrap();
 
-            let mut align = ash::util::Align::new(
-                data,
-                mem::align_of::<Vertex>() as u64,
-                vertex_buffer_size,
-            );
+            let mut align =
+                ash::util::Align::new(data, mem::align_of::<Vertex>() as u64, buffer_size);
             align.copy_from_slice(&vertices);
-            device.unmap_memory(vertex_buffer_mem);
+            device.unmap_memory(staging_buffer_mem);
+
+            let (vertex_buffer, vertex_buffer_mem) = Renderer::create_buffer(
+                &device,
+                buffer_size,
+                mem_properties,
+                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .unwrap();
+
+            // NOTE: Separate command pool for transient buffers?
+            //       would need to store this
+            let cmd_pool_info = vk::CommandPoolCreateInfo::builder()
+                .queue_family_index(queue_family_index as u32)
+                .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+            let transient_cmd_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
+            let buf_alloc_info = vk::CommandBufferAllocateInfo::builder()
+                .command_pool(transient_cmd_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
+
+            let transfer_cmd_buf = device.allocate_command_buffers(&buf_alloc_info).unwrap();
+            let begin_info = vk::CommandBufferBeginInfo::builder()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            device
+                .begin_command_buffer(transfer_cmd_buf[0], &begin_info)
+                .unwrap();
+
+            let copy_region = [vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: buffer_size,
+                ..Default::default()
+            }];
+
+            device.cmd_copy_buffer(
+                transfer_cmd_buf[0],
+                staging_buffer,
+                vertex_buffer,
+                &copy_region,
+            );
+
+            device.end_command_buffer(transfer_cmd_buf[0]).unwrap();
+
+            let submit_info = [vk::SubmitInfo::builder()
+                .command_buffers(&transfer_cmd_buf)
+                .build()];
+
+            device
+                .queue_submit(present_queue, &submit_info, vk::Fence::null())
+                .unwrap();
+            device.queue_wait_idle(present_queue).unwrap();
+
+            // NOTE: Would need to free command buffer if not for this
+            device.destroy_command_pool(transient_cmd_pool, None);
+
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_buffer_mem, None);
 
             // Command buffers
             let cmd_pool_info =
@@ -717,19 +780,26 @@ impl Renderer {
     pub fn recreate_swapchain(&mut self) {
         let vertices: Vec<Vertex> = vec![
             Vertex {
-                position: Vec2::new(0.0, -0.5),
-                color: Vec3::new(1.0, 0.0, 0.0),
+                position: Vec2::new(-0.5, -0.5),
+                color: Vec3::new(1.0, 0.0, 0.0)
             },
             Vertex {
-                position: Vec2::new(0.5, 0.5),
+                position: Vec2::new(0.5, -0.5),
                 color: Vec3::new(0.0, 1.0, 0.0),
             },
             Vertex {
-                position: Vec2::new(-0.5, 0.5),
+                position: Vec2::new(0.5, 0.5),
                 color: Vec3::new(0.0, 0.0, 1.0),
             },
+            Vertex {
+                position: Vec2::new(-0.5, 0.5),
+                color: Vec3::new(1.0, 1.0, 1.0),
+            },
         ];
-        unsafe {
+
+        let indices: [u16; 6] = [0, 1, 2, 2, 3, 0];
+
+       unsafe {
             self.device.device_wait_idle().unwrap();
             self.cleanup_swapchain();
 
@@ -928,6 +998,7 @@ impl Renderer {
                 )
                 .unwrap_or((0, true)); //FIXME: Bad
             if is_suboptimal {
+                self.should_recreate_swapchain = true;
                 return;
             }
 
@@ -950,11 +1021,11 @@ impl Renderer {
                 .unwrap();
 
             let swapchains = vec![self.swapchain];
-            let indices = [image_index];
+            let image_indices = [image_index];
             let present_info = vk::PresentInfoKHR::builder()
                 .wait_semaphores(&signal_semaphores)
                 .swapchains(&swapchains)
-                .image_indices(&indices);
+                .image_indices(&image_indices);
 
             is_suboptimal = self
                 .swapchain_loader
