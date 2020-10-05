@@ -11,13 +11,47 @@ use std::ffi::CStr;
 use std::io::Cursor;
 use std::mem;
 
-use glam::{Vec2, Vec3};
+use glam::{Mat4, Vec2, Vec3};
+
+lazy_static! {
+    static ref START_TIME: std::time::Instant = std::time::Instant::now();
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Vertex {
     pub position: Vec2,
     pub color: Vec3,
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct UniformBufferObject {
+    pub model: Mat4,
+    pub view: Mat4,
+    pub proj: Mat4,
+}
+
+lazy_static! {
+    static ref VERTICES: Vec<Vertex> = vec![
+        Vertex {
+            position: Vec2::new(-0.5, -0.5),
+            color: Vec3::new(1.0, 0.0, 0.0)
+        },
+        Vertex {
+            position: Vec2::new(0.5, -0.5),
+            color: Vec3::new(0.0, 1.0, 0.0),
+        },
+        Vertex {
+            position: Vec2::new(0.5, 0.5),
+            color: Vec3::new(0.0, 0.0, 1.0),
+        },
+        Vertex {
+            position: Vec2::new(-0.5, 0.5),
+            color: Vec3::new(1.0, 1.0, 1.0),
+        },
+    ];
+}
+
+static INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
 
 pub struct Renderer {
     entry: ash::Entry,
@@ -42,6 +76,7 @@ pub struct Renderer {
     swapchain_loader: Swapchain,
 
     render_pass: vk::RenderPass,
+    descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
     pipeline_layout: vk::PipelineLayout,
     graphics_pipeline: vk::Pipeline,
     framebuffers: Vec<vk::Framebuffer>,
@@ -52,6 +87,10 @@ pub struct Renderer {
     vertex_buffer_mem: vk::DeviceMemory,
     index_buffer: vk::Buffer,
     index_buffer_mem: vk::DeviceMemory,
+    uniform_buffers: Vec<vk::Buffer>,
+    uniform_buffers_mem: Vec<vk::DeviceMemory>,
+
+    descriptor_pool: vk::DescriptorPool,
 
     frames_in_flight: usize,
     current_frame: usize,
@@ -67,27 +106,6 @@ pub struct Renderer {
 impl Renderer {
     // TODO: Don't really need window here, just required exts
     pub fn new(window: &winit::window::Window) -> Result<Renderer, &'static str> {
-        let vertices: Vec<Vertex> = vec![
-            Vertex {
-                position: Vec2::new(-0.5, -0.5),
-                color: Vec3::new(1.0, 0.0, 0.0)
-            },
-            Vertex {
-                position: Vec2::new(0.5, -0.5),
-                color: Vec3::new(0.0, 1.0, 0.0),
-            },
-            Vertex {
-                position: Vec2::new(0.5, 0.5),
-                color: Vec3::new(0.0, 0.0, 1.0),
-            },
-            Vertex {
-                position: Vec2::new(-0.5, 0.5),
-                color: Vec3::new(1.0, 1.0, 1.0),
-            },
-        ];
-
-        let indices: [u16; 6] = [0, 1, 2, 2, 3, 0];
-
         let entry = ash::Entry::new().unwrap();
 
         unsafe {
@@ -498,8 +516,23 @@ impl Renderer {
                 .logic_op_enable(false)
                 .attachments(&color_blend_attachment);
 
+            // Descriptor set
+            let ubo_layout_bindings = [vk::DescriptorSetLayoutBinding::builder()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .build()];
+
+            let layout_info =
+                vk::DescriptorSetLayoutCreateInfo::builder().bindings(&ubo_layout_bindings);
+
+            let descriptor_set_layouts = vec![device
+                .create_descriptor_set_layout(&layout_info, None)
+                .unwrap()];
+
             // Pipeline
-            let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
+            let pipeline_layout_info =
+                vk::PipelineLayoutCreateInfo::builder().set_layouts(&descriptor_set_layouts);
             let pipeline_layout = device
                 .create_pipeline_layout(&pipeline_layout_info, None)
                 .unwrap();
@@ -543,7 +576,7 @@ impl Renderer {
             // Vertex buffer
             let mem_properties = instance.get_physical_device_memory_properties(physical_device);
 
-            let buffer_size = (mem::size_of::<Vertex>() * vertices.len()) as u64;
+            let buffer_size = (mem::size_of::<Vertex>() * VERTICES.len()) as u64;
 
             let (staging_buffer, staging_buffer_mem) = Renderer::create_buffer(
                 &device,
@@ -565,7 +598,7 @@ impl Renderer {
 
             let mut align =
                 ash::util::Align::new(data, mem::align_of::<Vertex>() as u64, buffer_size);
-            align.copy_from_slice(&vertices);
+            align.copy_from_slice(&VERTICES);
             device.unmap_memory(staging_buffer_mem);
 
             let (vertex_buffer, vertex_buffer_mem) = Renderer::create_buffer(
@@ -577,54 +610,84 @@ impl Renderer {
             )
             .unwrap();
 
-            // NOTE: Separate command pool for transient buffers?
-            //       would need to store this
-            let cmd_pool_info = vk::CommandPoolCreateInfo::builder()
-                .queue_family_index(queue_family_index as u32)
-                .flags(vk::CommandPoolCreateFlags::TRANSIENT);
-            let transient_cmd_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
-            let buf_alloc_info = vk::CommandBufferAllocateInfo::builder()
-                .command_pool(transient_cmd_pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(1);
-
-            let transfer_cmd_buf = device.allocate_command_buffers(&buf_alloc_info).unwrap();
-            let begin_info = vk::CommandBufferBeginInfo::builder()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            device
-                .begin_command_buffer(transfer_cmd_buf[0], &begin_info)
-                .unwrap();
-
-            let copy_region = [vk::BufferCopy {
-                src_offset: 0,
-                dst_offset: 0,
-                size: buffer_size,
-                ..Default::default()
-            }];
-
-            device.cmd_copy_buffer(
-                transfer_cmd_buf[0],
+            Renderer::copy_buffer(
+                &device,
+                present_queue,
+                queue_family_index as u32,
                 staging_buffer,
                 vertex_buffer,
-                &copy_region,
+                buffer_size,
             );
-
-            device.end_command_buffer(transfer_cmd_buf[0]).unwrap();
-
-            let submit_info = [vk::SubmitInfo::builder()
-                .command_buffers(&transfer_cmd_buf)
-                .build()];
-
-            device
-                .queue_submit(present_queue, &submit_info, vk::Fence::null())
-                .unwrap();
-            device.queue_wait_idle(present_queue).unwrap();
-
-            // NOTE: Would need to free command buffer if not for this
-            device.destroy_command_pool(transient_cmd_pool, None);
 
             device.destroy_buffer(staging_buffer, None);
             device.free_memory(staging_buffer_mem, None);
+
+            // Index buffer
+            let buffer_size = (mem::size_of::<Vertex>() * INDICES.len()) as u64;
+
+            let (staging_buffer, staging_buffer_mem) = Renderer::create_buffer(
+                &device,
+                buffer_size,
+                mem_properties,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .unwrap();
+
+            let data = device
+                .map_memory(
+                    staging_buffer_mem,
+                    0,
+                    buffer_size,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .unwrap();
+
+            let mut align = ash::util::Align::new(data, mem::align_of::<u16>() as u64, buffer_size);
+            align.copy_from_slice(&INDICES);
+            device.unmap_memory(staging_buffer_mem);
+
+            let (index_buffer, index_buffer_mem) = Renderer::create_buffer(
+                &device,
+                buffer_size,
+                mem_properties,
+                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .unwrap();
+
+            Renderer::copy_buffer(
+                &device,
+                present_queue,
+                queue_family_index as u32,
+                staging_buffer,
+                index_buffer,
+                buffer_size,
+            );
+
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_buffer_mem, None);
+
+            // Uniform buffers
+            let buffer_size = mem::size_of::<UniformBufferObject>();
+            let mut uniform_buffers = Vec::with_capacity(present_images.len());
+            let mut uniform_buffers_mem = Vec::with_capacity(present_images.len());
+
+            for i in 0..present_images.len() {
+                let (buf, buf_mem) = Renderer::create_buffer(
+                    &device,
+                    buffer_size as u64,
+                    mem_properties,
+                    vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                )
+                .unwrap();
+                uniform_buffers.push(buf);
+                uniform_buffers_mem.push(buf_mem);
+            }
+
+            // Descriptor pool
+            
 
             // Command buffers
             let cmd_pool_info =
@@ -678,11 +741,14 @@ impl Renderer {
                 let offsets = vec![0];
                 device.cmd_bind_vertex_buffers(*buffer, 0, &vertex_buffers, &offsets);
 
+                // Bind index buffer
+                device.cmd_bind_index_buffer(*buffer, index_buffer, 0, vk::IndexType::UINT16);
+
                 // Dynamic state
                 device.cmd_set_viewport(*buffer, 0, &viewport);
                 device.cmd_set_scissor(*buffer, 0, &scissor);
 
-                device.cmd_draw(*buffer, vertices.len() as u32, 1, 0, 0);
+                device.cmd_draw_indexed(*buffer, INDICES.len() as u32, 1, 0, 0, 0);
 
                 device.cmd_end_render_pass(*buffer);
 
@@ -725,6 +791,7 @@ impl Renderer {
                 surface_loader,
                 swapchain_loader,
                 render_pass,
+                descriptor_set_layouts,
                 pipeline_layout,
                 graphics_pipeline: graphics_pipeline[0], // FIXME
                 framebuffers,
@@ -732,6 +799,10 @@ impl Renderer {
                 command_buffers,
                 vertex_buffer,
                 vertex_buffer_mem,
+                index_buffer,
+                index_buffer_mem,
+                uniform_buffers,
+                uniform_buffers_mem,
                 frames_in_flight,
                 current_frame: 0,
                 in_flight_fences,
@@ -776,30 +847,61 @@ impl Renderer {
         }
     }
 
+    fn copy_buffer(
+        device: &ash::Device,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        src: vk::Buffer,
+        dst: vk::Buffer,
+        size: u64,
+    ) {
+        unsafe {
+            // NOTE: Separate command pool for transient buffers?
+            //       would need to store this
+            let cmd_pool_info = vk::CommandPoolCreateInfo::builder()
+                .queue_family_index(queue_family_index)
+                .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+            let transient_cmd_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
+            let buf_alloc_info = vk::CommandBufferAllocateInfo::builder()
+                .command_pool(transient_cmd_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
+
+            let transfer_cmd_buf = device.allocate_command_buffers(&buf_alloc_info).unwrap();
+            let begin_info = vk::CommandBufferBeginInfo::builder()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            device
+                .begin_command_buffer(transfer_cmd_buf[0], &begin_info)
+                .unwrap();
+
+            let copy_region = [vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: size,
+                ..Default::default()
+            }];
+
+            device.cmd_copy_buffer(transfer_cmd_buf[0], src, dst, &copy_region);
+
+            device.end_command_buffer(transfer_cmd_buf[0]).unwrap();
+
+            let submit_info = [vk::SubmitInfo::builder()
+                .command_buffers(&transfer_cmd_buf)
+                .build()];
+
+            device
+                .queue_submit(queue, &submit_info, vk::Fence::null())
+                .unwrap();
+            device.queue_wait_idle(queue).unwrap();
+
+            // NOTE: Would need to free command buffer if not for this
+            device.destroy_command_pool(transient_cmd_pool, None);
+        }
+    }
+
     // FIXME: Sus
     pub fn recreate_swapchain(&mut self) {
-        let vertices: Vec<Vertex> = vec![
-            Vertex {
-                position: Vec2::new(-0.5, -0.5),
-                color: Vec3::new(1.0, 0.0, 0.0)
-            },
-            Vertex {
-                position: Vec2::new(0.5, -0.5),
-                color: Vec3::new(0.0, 1.0, 0.0),
-            },
-            Vertex {
-                position: Vec2::new(0.5, 0.5),
-                color: Vec3::new(0.0, 0.0, 1.0),
-            },
-            Vertex {
-                position: Vec2::new(-0.5, 0.5),
-                color: Vec3::new(1.0, 1.0, 1.0),
-            },
-        ];
-
-        let indices: [u16; 6] = [0, 1, 2, 2, 3, 0];
-
-       unsafe {
+        unsafe {
             self.device.device_wait_idle().unwrap();
             self.cleanup_swapchain();
 
@@ -937,6 +1039,14 @@ impl Renderer {
                 self.device
                     .cmd_bind_vertex_buffers(*buffer, 0, &vertex_buffers, &offsets);
 
+                // bind index buffer
+                self.device.cmd_bind_index_buffer(
+                    *buffer,
+                    self.index_buffer,
+                    0,
+                    vk::IndexType::UINT16,
+                );
+
                 let viewport = [vk::Viewport::builder()
                     .x(0.0)
                     .y(0.0)
@@ -956,7 +1066,7 @@ impl Renderer {
                 self.device.cmd_set_scissor(*buffer, 0, &scissor);
 
                 self.device
-                    .cmd_draw(*buffer, vertices.len() as u32, 1, 0, 0);
+                    .cmd_draw_indexed(*buffer, INDICES.len() as u32, 1, 0, 0, 0);
 
                 self.device.cmd_end_render_pass(*buffer);
 
@@ -978,6 +1088,13 @@ impl Renderer {
             }
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
+
+            for b in self.uniform_buffers.iter() {
+                self.device.destroy_buffer(*b, None);
+            }
+            for m in self.uniform_buffers_mem.iter() {
+                self.device.free_memory(*m, None);
+            }
         }
     }
 
@@ -1001,6 +1118,44 @@ impl Renderer {
                 self.should_recreate_swapchain = true;
                 return;
             }
+
+            // UBO
+            let current_time = std::time::Instant::now();
+            let time = current_time.duration_since(*START_TIME).as_secs();
+
+            let ubo = UniformBufferObject {
+                model: glam::Mat4::from_rotation_z(90.0_f32.to_radians()),
+                view: glam::Mat4::look_at_lh(
+                    Vec3::new(2.0, 2.0, 2.0),
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.0, 0.0, 1.0),
+                ),
+                proj: glam::Mat4::perspective_lh(
+                    90.0_f32.to_radians(),
+                    self.surface_extent.width as f32 / self.surface_extent.height as f32,
+                    0.1,
+                    10.0,
+                ),
+            };
+
+            let data = self
+                .device
+                .map_memory(
+                    self.uniform_buffers_mem[image_index as usize],
+                    0,
+                    mem::size_of::<UniformBufferObject>() as u64,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .unwrap();
+
+            let mut align = ash::util::Align::new(
+                data,
+                mem::align_of::<UniformBufferObject>() as u64,
+                mem::size_of::<UniformBufferObject>() as u64,
+            );
+            align.copy_from_slice(&[ubo]);
+            self.device
+                .unmap_memory(self.uniform_buffers_mem[image_index as usize]);
 
             let wait_semaphores = [self.image_available_sems[self.current_frame]];
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -1046,9 +1201,20 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+            for d in self.descriptor_set_layouts.iter() {
+                self.device.destroy_descriptor_set_layout(*d, None);
+            }
             self.device.destroy_buffer(self.vertex_buffer, None);
             self.device.free_memory(self.vertex_buffer_mem, None);
+            self.device.destroy_buffer(self.index_buffer, None);
+            self.device.free_memory(self.index_buffer_mem, None);
             self.device.destroy_command_pool(self.command_pool, None);
+            for b in self.uniform_buffers.iter() {
+                self.device.destroy_buffer(*b, None);
+            }
+            for m in self.uniform_buffers_mem.iter() {
+                self.device.free_memory(*m, None);
+            }
             for s in self.image_available_sems.iter() {
                 self.device.destroy_semaphore(*s, None);
             }
