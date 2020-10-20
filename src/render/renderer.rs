@@ -91,6 +91,9 @@ pub struct Renderer {
     uniform_buffers: Vec<vk::Buffer>,
     uniform_buffers_mem: Vec<vk::DeviceMemory>,
 
+    texture_image: vk::Image,
+    texture_image_mem: vk::DeviceMemory,
+
     descriptor_pool: vk::DescriptorPool,
     descriptor_sets: Vec<vk::DescriptorSet>,
 
@@ -578,9 +581,49 @@ impl Renderer {
                 framebuffers.push(device.create_framebuffer(&framebuffer_info, None).unwrap());
             }
 
-            // Vertex buffer
             let mem_properties = instance.get_physical_device_memory_properties(physical_device);
 
+            // Texture image
+
+            // FIXME: Lazy
+            let image = image::load_from_memory(include_bytes!("../bin/textures/uv_test.png"))
+                .unwrap()
+                .to_rgba();
+            let image_size = (mem::size_of::<u8>() * image.len()) as u64;
+
+            let (staging_buffer, staging_buffer_mem) = Renderer::create_buffer(
+                &device,
+                image_size,
+                mem_properties,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .unwrap();
+
+            let data = device
+                .map_memory(
+                    staging_buffer_mem,
+                    0,
+                    image_size,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .unwrap();
+
+            let mut align = ash::util::Align::new(data, image_size, image_size);
+            align.copy_from_slice(&image);
+            device.unmap_memory(staging_buffer_mem);
+
+            let image_info = vk::ImageCreateInfo::builder()
+                .image_type(vk::ImageType::TYPE_2D)
+                .extent(vk::Extent3D {
+                    width: image.width(),
+                    height: image.height(),
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1);
+
+            // Vertex buffer
             let buffer_size = (mem::size_of::<Vertex>() * VERTICES.len()) as u64;
 
             let (staging_buffer, staging_buffer_mem) = Renderer::create_buffer(
@@ -678,7 +721,7 @@ impl Renderer {
             let mut uniform_buffers = Vec::with_capacity(present_images.len());
             let mut uniform_buffers_mem = Vec::with_capacity(present_images.len());
 
-            for i in 0..present_images.len() {
+            for _i in 0..present_images.len() {
                 let (buf, buf_mem) = Renderer::create_buffer(
                     &device,
                     buffer_size as u64,
@@ -705,7 +748,7 @@ impl Renderer {
 
             // Descriptor sets
             let mut descriptor_set_layouts = Vec::with_capacity(present_images.len());
-            for i in 0..descriptor_set_layouts.capacity() {
+            for _i in 0..descriptor_set_layouts.capacity() {
                 descriptor_set_layouts.push(descriptor_set_layout);
             }
 
@@ -1342,9 +1385,10 @@ impl Drop for Renderer {
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device.destroy_render_pass(self.render_pass, None);
-            for d in self.descriptor_set_layouts.iter() {
-                self.device.destroy_descriptor_set_layout(*d, None);
-            }
+
+            self.device
+                .destroy_descriptor_set_layout(self.descriptor_set_layouts[0], None);
+
             self.device.destroy_buffer(self.vertex_buffer, None);
             self.device.free_memory(self.vertex_buffer_mem, None);
             self.device.destroy_buffer(self.index_buffer, None);
