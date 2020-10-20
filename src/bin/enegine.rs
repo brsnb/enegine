@@ -39,6 +39,7 @@ fn main() {
                 }
                 winit::event::WindowEvent::Resized(_dims) => {
                     // TODO: Recreate swapchain
+                    println!("WINIT RESIZED");
                     renderer.should_recreate_swapchain = true;
                 }
                 _ => {}

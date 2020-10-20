@@ -24,6 +24,7 @@ pub struct Vertex {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct UniformBufferObject {
     pub model: Mat4,
     pub view: Mat4,
@@ -91,6 +92,7 @@ pub struct Renderer {
     uniform_buffers_mem: Vec<vk::DeviceMemory>,
 
     descriptor_pool: vk::DescriptorPool,
+    descriptor_sets: Vec<vk::DescriptorSet>,
 
     frames_in_flight: usize,
     current_frame: usize,
@@ -489,7 +491,7 @@ impl Renderer {
                 .polygon_mode(vk::PolygonMode::FILL)
                 .line_width(1.0)
                 .cull_mode(vk::CullModeFlags::BACK)
-                .front_face(vk::FrontFace::CLOCKWISE) // FIXME: Make CCW
+                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
                 .depth_bias_enable(false);
 
             let multisample_info = vk::PipelineMultisampleStateCreateInfo::builder()
@@ -521,18 +523,21 @@ impl Renderer {
                 .binding(0)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .stage_flags(vk::ShaderStageFlags::VERTEX)
+                .descriptor_count(1)
                 .build()];
 
             let layout_info =
                 vk::DescriptorSetLayoutCreateInfo::builder().bindings(&ubo_layout_bindings);
 
-            let descriptor_set_layouts = vec![device
+            let descriptor_set_layout = device
                 .create_descriptor_set_layout(&layout_info, None)
-                .unwrap()];
+                .unwrap();
+
+            let desc_set_layouts = [descriptor_set_layout];
 
             // Pipeline
             let pipeline_layout_info =
-                vk::PipelineLayoutCreateInfo::builder().set_layouts(&descriptor_set_layouts);
+                vk::PipelineLayoutCreateInfo::builder().set_layouts(&desc_set_layouts);
             let pipeline_layout = device
                 .create_pipeline_layout(&pipeline_layout_info, None)
                 .unwrap();
@@ -687,7 +692,48 @@ impl Renderer {
             }
 
             // Descriptor pool
-            
+            let pool_sizes = [vk::DescriptorPoolSize::builder()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(present_images.len() as u32)
+                .build()];
+
+            let pool_info = vk::DescriptorPoolCreateInfo::builder()
+                .pool_sizes(&pool_sizes)
+                .max_sets(present_images.len() as u32);
+
+            let descriptor_pool = device.create_descriptor_pool(&pool_info, None).unwrap();
+
+            // Descriptor sets
+            let mut descriptor_set_layouts = Vec::with_capacity(present_images.len());
+            for i in 0..descriptor_set_layouts.capacity() {
+                descriptor_set_layouts.push(descriptor_set_layout);
+            }
+
+            let descriptor_set_info = vk::DescriptorSetAllocateInfo::builder()
+                .descriptor_pool(descriptor_pool)
+                .set_layouts(&descriptor_set_layouts);
+
+            let descriptor_sets = device
+                .allocate_descriptor_sets(&descriptor_set_info)
+                .unwrap();
+
+            for (i, s) in descriptor_sets.iter().enumerate() {
+                let buffer_info = vk::DescriptorBufferInfo::builder()
+                    .buffer(uniform_buffers[i])
+                    .offset(0)
+                    .range(mem::size_of::<UniformBufferObject>() as u64)
+                    .build();
+
+                let descriptor_writes = vk::WriteDescriptorSet::builder()
+                    .dst_set(*s)
+                    .dst_binding(0)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(&[buffer_info])
+                    .build();
+
+                device.update_descriptor_sets(&[descriptor_writes], &[]);
+            }
 
             // Command buffers
             let cmd_pool_info =
@@ -748,6 +794,16 @@ impl Renderer {
                 device.cmd_set_viewport(*buffer, 0, &viewport);
                 device.cmd_set_scissor(*buffer, 0, &scissor);
 
+                // Bind descriptor sets
+                device.cmd_bind_descriptor_sets(
+                    *buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline_layout,
+                    0,
+                    &[descriptor_sets[i]],
+                    &[],
+                );
+
                 device.cmd_draw_indexed(*buffer, INDICES.len() as u32, 1, 0, 0, 0);
 
                 device.cmd_end_render_pass(*buffer);
@@ -803,6 +859,8 @@ impl Renderer {
                 index_buffer_mem,
                 uniform_buffers,
                 uniform_buffers_mem,
+                descriptor_pool,
+                descriptor_sets,
                 frames_in_flight,
                 current_frame: 0,
                 in_flight_fences,
@@ -814,96 +872,111 @@ impl Renderer {
         }
     }
 
-    // TODO: At least unwrap_or()
-    //       Something like this is a good candidate for a Context struct
-    fn create_buffer(
-        device: &ash::Device,
-        size: vk::DeviceSize,
-        physical_props: vk::PhysicalDeviceMemoryProperties,
-        usage: vk::BufferUsageFlags,
-        props: vk::MemoryPropertyFlags,
-    ) -> Option<(vk::Buffer, vk::DeviceMemory)> {
+    pub fn render(&mut self) {
         unsafe {
-            let create_info = vk::BufferCreateInfo::builder()
-                .size(size)
-                .usage(usage)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            let fences = vec![self.in_flight_fences[self.current_frame]];
+            self.device
+                .wait_for_fences(&fences, true, std::u64::MAX)
+                .unwrap();
+            self.device.reset_fences(&fences).unwrap();
+            let (image_index, mut is_suboptimal) = self
+                .swapchain_loader
+                .acquire_next_image(
+                    self.swapchain,
+                    std::u64::MAX,
+                    self.image_available_sems[self.current_frame],
+                    vk::Fence::null(),
+                )
+                .unwrap_or((0, true)); //FIXME: Bad
+            if is_suboptimal {
+                self.recreate_swapchain();
+                self.should_recreate_swapchain = false;
+                return;
+            }
 
-            let buffer = device.create_buffer(&create_info, None).unwrap();
+            // UBO
+            //let current_time = std::time::Instant::now();
+            //let time = current_time.duration_since(*START_TIME).as_secs();
 
-            let mem_requirements = device.get_buffer_memory_requirements(buffer);
+            let ubo = UniformBufferObject {
+                model: glam::Mat4::from_rotation_z(90.0_f32.to_radians()),
+                view: glam::Mat4::look_at_lh(
+                    Vec3::new(2.0, 2.0, 2.0),
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.0, 0.0, 1.0),
+                ),
+                proj: glam::Mat4::perspective_lh(
+                    45.0_f32.to_radians(),
+                    self.surface_extent.width as f32 / self.surface_extent.height as f32,
+                    0.1,
+                    10.0,
+                ),
+            };
 
-            let alloc_info = vk::MemoryAllocateInfo::builder()
-                .allocation_size(mem_requirements.size)
-                .memory_type_index(
-                    find_memorytype_index(&mem_requirements, &physical_props, props).unwrap(),
-                );
-
-            let buffer_mem = device.allocate_memory(&alloc_info, None).unwrap();
-
-            device.bind_buffer_memory(buffer, buffer_mem, 0).unwrap();
-
-            Some((buffer, buffer_mem))
-        }
-    }
-
-    fn copy_buffer(
-        device: &ash::Device,
-        queue: vk::Queue,
-        queue_family_index: u32,
-        src: vk::Buffer,
-        dst: vk::Buffer,
-        size: u64,
-    ) {
-        unsafe {
-            // NOTE: Separate command pool for transient buffers?
-            //       would need to store this
-            let cmd_pool_info = vk::CommandPoolCreateInfo::builder()
-                .queue_family_index(queue_family_index)
-                .flags(vk::CommandPoolCreateFlags::TRANSIENT);
-            let transient_cmd_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
-            let buf_alloc_info = vk::CommandBufferAllocateInfo::builder()
-                .command_pool(transient_cmd_pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(1);
-
-            let transfer_cmd_buf = device.allocate_command_buffers(&buf_alloc_info).unwrap();
-            let begin_info = vk::CommandBufferBeginInfo::builder()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            device
-                .begin_command_buffer(transfer_cmd_buf[0], &begin_info)
+            let data = self
+                .device
+                .map_memory(
+                    self.uniform_buffers_mem[image_index as usize],
+                    0,
+                    mem::size_of::<UniformBufferObject>() as u64,
+                    vk::MemoryMapFlags::empty(),
+                )
                 .unwrap();
 
-            let copy_region = [vk::BufferCopy {
-                src_offset: 0,
-                dst_offset: 0,
-                size: size,
-                ..Default::default()
-            }];
+            let mut align = ash::util::Align::new(
+                data,
+                mem::align_of::<UniformBufferObject>() as u64,
+                mem::size_of::<UniformBufferObject>() as u64,
+            );
+            align.copy_from_slice(&[ubo]);
+            self.device
+                .unmap_memory(self.uniform_buffers_mem[image_index as usize]);
 
-            device.cmd_copy_buffer(transfer_cmd_buf[0], src, dst, &copy_region);
+            // Semaphore
+            let wait_semaphores = [self.image_available_sems[self.current_frame]];
+            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let signal_semaphores = [self.render_finished_sems[self.current_frame]];
+            let command_buffer = [self.command_buffers[image_index as usize]];
+            let submit_info = vk::SubmitInfo::builder()
+                .wait_semaphores(&wait_semaphores)
+                .wait_dst_stage_mask(&wait_stages)
+                .command_buffers(&command_buffer)
+                .signal_semaphores(&signal_semaphores);
 
-            device.end_command_buffer(transfer_cmd_buf[0]).unwrap();
-
-            let submit_info = [vk::SubmitInfo::builder()
-                .command_buffers(&transfer_cmd_buf)
-                .build()];
-
-            device
-                .queue_submit(queue, &submit_info, vk::Fence::null())
+            self.device
+                .queue_submit(
+                    self.present_queue,
+                    &[submit_info.build()],
+                    self.in_flight_fences[self.current_frame],
+                )
                 .unwrap();
-            device.queue_wait_idle(queue).unwrap();
 
-            // NOTE: Would need to free command buffer if not for this
-            device.destroy_command_pool(transient_cmd_pool, None);
+            let swapchains = [self.swapchain];
+            let image_indices = [image_index];
+            let present_info = vk::PresentInfoKHR::builder()
+                .wait_semaphores(&signal_semaphores)
+                .swapchains(&swapchains)
+                .image_indices(&image_indices);
+
+            is_suboptimal = self
+                .swapchain_loader
+                .queue_present(self.present_queue, &present_info)
+                .unwrap_or(true); //FIXME: Bad
+
+            if is_suboptimal || self.should_recreate_swapchain {
+                self.should_recreate_swapchain = false;
+                self.recreate_swapchain();
+            }
         }
+
+        self.current_frame = (self.current_frame + 1) % self.frames_in_flight;
     }
 
     // FIXME: Sus
     pub fn recreate_swapchain(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
-            self.cleanup_swapchain();
+            self.destroy_swapchain();
 
             let surface_caps = self
                 .surface_loader
@@ -989,6 +1062,70 @@ impl Renderer {
                 );
             }
 
+            // Uniform buffers
+            let mem_properties = self
+                .instance
+                .get_physical_device_memory_properties(self.physical_device);
+            let buffer_size = mem::size_of::<UniformBufferObject>();
+
+            self.uniform_buffers.clear();
+            self.uniform_buffers_mem.clear();
+            for _i in 0..self.present_images.len() {
+                let (buf, buf_mem) = Renderer::create_buffer(
+                    &self.device,
+                    buffer_size as u64,
+                    mem_properties,
+                    vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                )
+                .unwrap();
+                self.uniform_buffers.push(buf);
+                self.uniform_buffers_mem.push(buf_mem);
+            }
+            // Descriptor pool
+            let pool_sizes = [vk::DescriptorPoolSize::builder()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(self.present_images.len() as u32)
+                .build()];
+
+            let pool_info = vk::DescriptorPoolCreateInfo::builder()
+                .pool_sizes(&pool_sizes)
+                .max_sets(self.present_images.len() as u32);
+
+            self.descriptor_pool = self
+                .device
+                .create_descriptor_pool(&pool_info, None)
+                .unwrap();
+
+            // Descriptor sets
+            let descriptor_set_info = vk::DescriptorSetAllocateInfo::builder()
+                .descriptor_pool(self.descriptor_pool)
+                .set_layouts(&self.descriptor_set_layouts);
+
+            self.descriptor_sets = self
+                .device
+                .allocate_descriptor_sets(&descriptor_set_info)
+                .unwrap();
+
+            for (i, s) in self.descriptor_sets.iter().enumerate() {
+                let buffer_info = vk::DescriptorBufferInfo::builder()
+                    .buffer(self.uniform_buffers[i])
+                    .offset(0)
+                    .range(mem::size_of::<UniformBufferObject>() as u64)
+                    .build();
+
+                let descriptor_writes = vk::WriteDescriptorSet::builder()
+                    .dst_set(*s)
+                    .dst_binding(0)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(&[buffer_info])
+                    .build();
+
+                self.device
+                    .update_descriptor_sets(&[descriptor_writes], &[]);
+            }
+
             // One buffer for each framebuffer
             let buf_alloc_info = vk::CommandBufferAllocateInfo::builder()
                 .command_pool(self.command_pool)
@@ -1065,6 +1202,16 @@ impl Renderer {
                 self.device.cmd_set_viewport(*buffer, 0, &viewport);
                 self.device.cmd_set_scissor(*buffer, 0, &scissor);
 
+                // Bind descriptor sets
+                self.device.cmd_bind_descriptor_sets(
+                    *buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    self.pipeline_layout,
+                    0,
+                    &[self.descriptor_sets[i]],
+                    &[],
+                );
+
                 self.device
                     .cmd_draw_indexed(*buffer, INDICES.len() as u32, 1, 0, 0, 0);
 
@@ -1076,7 +1223,7 @@ impl Renderer {
     }
 
     // FIXME: Also sus
-    fn cleanup_swapchain(&mut self) {
+    fn destroy_swapchain(&mut self) {
         unsafe {
             for f in self.framebuffers.iter() {
                 self.device.destroy_framebuffer(*f, None);
@@ -1095,105 +1242,94 @@ impl Renderer {
             for m in self.uniform_buffers_mem.iter() {
                 self.device.free_memory(*m, None);
             }
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
         }
     }
 
-    pub fn render(&mut self) {
+    // TODO: At least unwrap_or()
+    //       Something like this is a good candidate for a Context struct
+    fn create_buffer(
+        device: &ash::Device,
+        size: vk::DeviceSize,
+        physical_props: vk::PhysicalDeviceMemoryProperties,
+        usage: vk::BufferUsageFlags,
+        props: vk::MemoryPropertyFlags,
+    ) -> Option<(vk::Buffer, vk::DeviceMemory)> {
         unsafe {
-            let fences = vec![self.in_flight_fences[self.current_frame]];
-            self.device
-                .wait_for_fences(&fences, true, std::u64::MAX)
-                .unwrap();
-            self.device.reset_fences(&fences).unwrap();
-            let (image_index, mut is_suboptimal) = self
-                .swapchain_loader
-                .acquire_next_image(
-                    self.swapchain,
-                    std::u64::MAX,
-                    self.image_available_sems[self.current_frame],
-                    vk::Fence::null(),
-                )
-                .unwrap_or((0, true)); //FIXME: Bad
-            if is_suboptimal {
-                self.should_recreate_swapchain = true;
-                return;
-            }
+            let create_info = vk::BufferCreateInfo::builder()
+                .size(size)
+                .usage(usage)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-            // UBO
-            let current_time = std::time::Instant::now();
-            let time = current_time.duration_since(*START_TIME).as_secs();
+            let buffer = device.create_buffer(&create_info, None).unwrap();
 
-            let ubo = UniformBufferObject {
-                model: glam::Mat4::from_rotation_z(90.0_f32.to_radians()),
-                view: glam::Mat4::look_at_lh(
-                    Vec3::new(2.0, 2.0, 2.0),
-                    Vec3::new(0.0, 0.0, 0.0),
-                    Vec3::new(0.0, 0.0, 1.0),
-                ),
-                proj: glam::Mat4::perspective_lh(
-                    90.0_f32.to_radians(),
-                    self.surface_extent.width as f32 / self.surface_extent.height as f32,
-                    0.1,
-                    10.0,
-                ),
-            };
+            let mem_requirements = device.get_buffer_memory_requirements(buffer);
 
-            let data = self
-                .device
-                .map_memory(
-                    self.uniform_buffers_mem[image_index as usize],
-                    0,
-                    mem::size_of::<UniformBufferObject>() as u64,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .unwrap();
+            let alloc_info = vk::MemoryAllocateInfo::builder()
+                .allocation_size(mem_requirements.size)
+                .memory_type_index(
+                    find_memorytype_index(&mem_requirements, &physical_props, props).unwrap(),
+                );
 
-            let mut align = ash::util::Align::new(
-                data,
-                mem::align_of::<UniformBufferObject>() as u64,
-                mem::size_of::<UniformBufferObject>() as u64,
-            );
-            align.copy_from_slice(&[ubo]);
-            self.device
-                .unmap_memory(self.uniform_buffers_mem[image_index as usize]);
+            let buffer_mem = device.allocate_memory(&alloc_info, None).unwrap();
 
-            let wait_semaphores = [self.image_available_sems[self.current_frame]];
-            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-            let signal_semaphores = [self.render_finished_sems[self.current_frame]];
-            let command_buffer = [self.command_buffers[image_index as usize]];
-            let submit_info = vk::SubmitInfo::builder()
-                .wait_semaphores(&wait_semaphores)
-                .wait_dst_stage_mask(&wait_stages)
-                .command_buffers(&command_buffer)
-                .signal_semaphores(&signal_semaphores);
+            device.bind_buffer_memory(buffer, buffer_mem, 0).unwrap();
 
-            self.device
-                .queue_submit(
-                    self.present_queue,
-                    &[submit_info.build()],
-                    self.in_flight_fences[self.current_frame],
-                )
-                .unwrap();
-
-            let swapchains = vec![self.swapchain];
-            let image_indices = [image_index];
-            let present_info = vk::PresentInfoKHR::builder()
-                .wait_semaphores(&signal_semaphores)
-                .swapchains(&swapchains)
-                .image_indices(&image_indices);
-
-            is_suboptimal = self
-                .swapchain_loader
-                .queue_present(self.present_queue, &present_info)
-                .unwrap_or(true); //FIXME: Bad
-
-            if is_suboptimal || self.should_recreate_swapchain {
-                self.should_recreate_swapchain = false;
-                self.recreate_swapchain();
-            }
+            Some((buffer, buffer_mem))
         }
+    }
 
-        self.current_frame = (self.current_frame + 1) % self.frames_in_flight;
+    fn copy_buffer(
+        device: &ash::Device,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        src: vk::Buffer,
+        dst: vk::Buffer,
+        size: u64,
+    ) {
+        unsafe {
+            // NOTE: Separate command pool for transient buffers?
+            //       would need to store this
+            let cmd_pool_info = vk::CommandPoolCreateInfo::builder()
+                .queue_family_index(queue_family_index)
+                .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+            let transient_cmd_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
+            let buf_alloc_info = vk::CommandBufferAllocateInfo::builder()
+                .command_pool(transient_cmd_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
+
+            let transfer_cmd_buf = device.allocate_command_buffers(&buf_alloc_info).unwrap();
+            let begin_info = vk::CommandBufferBeginInfo::builder()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            device
+                .begin_command_buffer(transfer_cmd_buf[0], &begin_info)
+                .unwrap();
+
+            let copy_region = [vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size,
+                ..Default::default()
+            }];
+
+            device.cmd_copy_buffer(transfer_cmd_buf[0], src, dst, &copy_region);
+
+            device.end_command_buffer(transfer_cmd_buf[0]).unwrap();
+
+            let submit_info = [vk::SubmitInfo::builder()
+                .command_buffers(&transfer_cmd_buf)
+                .build()];
+
+            device
+                .queue_submit(queue, &submit_info, vk::Fence::null())
+                .unwrap();
+            device.queue_wait_idle(queue).unwrap();
+
+            // NOTE: Would need to free command buffer if not for this
+            device.destroy_command_pool(transient_cmd_pool, None);
+        }
     }
 }
 
@@ -1201,6 +1337,11 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+            self.destroy_swapchain();
+            self.device.destroy_pipeline(self.graphics_pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.destroy_render_pass(self.render_pass, None);
             for d in self.descriptor_set_layouts.iter() {
                 self.device.destroy_descriptor_set_layout(*d, None);
             }
@@ -1209,12 +1350,6 @@ impl Drop for Renderer {
             self.device.destroy_buffer(self.index_buffer, None);
             self.device.free_memory(self.index_buffer_mem, None);
             self.device.destroy_command_pool(self.command_pool, None);
-            for b in self.uniform_buffers.iter() {
-                self.device.destroy_buffer(*b, None);
-            }
-            for m in self.uniform_buffers_mem.iter() {
-                self.device.free_memory(*m, None);
-            }
             for s in self.image_available_sems.iter() {
                 self.device.destroy_semaphore(*s, None);
             }
@@ -1224,22 +1359,10 @@ impl Drop for Renderer {
             for f in self.in_flight_fences.iter() {
                 self.device.destroy_fence(*f, None);
             }
-            for f in self.framebuffers.iter() {
-                self.device.destroy_framebuffer(*f, None);
-            }
             if let Some(ref utils) = self.debug_utils {
                 utils.destroy_debug_utils_messenger(self.debug_messenger, None);
             }
-            for &v in self.present_image_views.iter() {
-                self.device.destroy_image_view(v, None);
-            }
-            self.swapchain_loader
-                .destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
-            self.device.destroy_pipeline(self.graphics_pipeline, None);
-            self.device
-                .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.destroy_render_pass(self.render_pass, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
