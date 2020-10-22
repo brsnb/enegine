@@ -583,45 +583,6 @@ impl Renderer {
 
             let mem_properties = instance.get_physical_device_memory_properties(physical_device);
 
-            // Texture image
-
-            // FIXME: Lazy
-            let image = image::load_from_memory(include_bytes!("../bin/textures/uv_test.png"))
-                .unwrap()
-                .to_rgba();
-            let image_size = (mem::size_of::<u8>() * image.len()) as u64;
-
-            let (staging_buffer, staging_buffer_mem) = Renderer::create_buffer(
-                &device,
-                image_size,
-                mem_properties,
-                vk::BufferUsageFlags::TRANSFER_SRC,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
-            .unwrap();
-
-            let data = device
-                .map_memory(
-                    staging_buffer_mem,
-                    0,
-                    image_size,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .unwrap();
-
-            let mut align = ash::util::Align::new(data, image_size, image_size);
-            align.copy_from_slice(&image);
-            device.unmap_memory(staging_buffer_mem);
-
-            let image_info = vk::ImageCreateInfo::builder()
-                .image_type(vk::ImageType::TYPE_2D)
-                .extent(vk::Extent3D {
-                    width: image.width(),
-                    height: image.height(),
-                    depth: 1,
-                })
-                .mip_levels(1)
-                .array_layers(1);
 
             // Vertex buffer
             let buffer_size = (mem::size_of::<Vertex>() * VERTICES.len()) as u64;
@@ -778,12 +739,66 @@ impl Renderer {
                 device.update_descriptor_sets(&[descriptor_writes], &[]);
             }
 
-            // Command buffers
+            // Command pool
             let cmd_pool_info =
                 vk::CommandPoolCreateInfo::builder().queue_family_index(queue_family_index as u32);
 
             let command_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
 
+            // Texture image
+            // FIXME: Lazy
+            let image = image::load_from_memory(include_bytes!("../bin/textures/uv_test.png"))
+                .unwrap()
+                .to_rgba();
+            let image_size = (mem::size_of::<u8>() * image.len()) as u64;
+
+            let (staging_buffer, staging_buffer_mem) = Renderer::create_buffer(
+                &device,
+                image_size,
+                mem_properties,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .unwrap();
+
+            let data = device
+                .map_memory(
+                    staging_buffer_mem,
+                    0,
+                    image_size,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .unwrap();
+
+            let mut align = ash::util::Align::new(data, image_size, image_size);
+            align.copy_from_slice(&image);
+            device.unmap_memory(staging_buffer_mem);
+
+            let (texture_image, texture_image_mem) = Renderer::create_image(
+                &device,
+                image.width(),
+                image.height(),
+                vk::Format::R8G8B8A8_SRGB,
+                vk::ImageTiling::OPTIMAL,
+                vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                mem_properties,
+            )
+            .unwrap();
+
+            let transition_buf_info = vk::CommandBufferAllocateInfo::builder()
+                .command_pool(command_pool)
+                .command_buffer_count(1)
+                .level(vk::CommandBufferLevel::PRIMARY);
+
+            let transition_buf = device.allocate_command_buffers(&transition_buf_info).unwrap();
+
+            Renderer::do_single_command(&device, transition_buf[0], present_queue, |device, transition_buf| {
+                let barrier = vk::ImageMemoryBarrier::builder()
+                    .old_layout(old_layout)
+            });
+
+            // Command buffers
             // One buffer for each framebuffer
             let buf_alloc_info = vk::CommandBufferAllocateInfo::builder()
                 .command_pool(command_pool)
@@ -1323,6 +1338,50 @@ impl Renderer {
         }
     }
 
+    fn do_single_command<D: DeviceV1_0, F: FnOnce(&D, vk::CommandBuffer)>(
+        device: &D,
+        command_buffer: vk::CommandBuffer,
+        queue: vk::Queue,
+        f: F,
+    ) {
+        unsafe {
+            device
+                .reset_command_buffer(
+                    command_buffer,
+                    vk::CommandBufferResetFlags::RELEASE_RESOURCES,
+                )
+                .unwrap();
+
+            let begin_info = vk::CommandBufferBeginInfo::builder()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+            device
+                .begin_command_buffer(command_buffer, &begin_info)
+                .unwrap();
+
+            f(device, command_buffer);
+
+            device.end_command_buffer(command_buffer).unwrap();
+
+            let submit_fence = device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+                .unwrap();
+
+            let command_buffers = [command_buffer];
+
+            let submit_info = vk::SubmitInfo::builder().command_buffers(&command_buffers);
+
+            device
+                .queue_submit(queue, &[submit_info.build()], submit_fence)
+                .unwrap();
+            device
+                .wait_for_fences(&[submit_fence], true, std::u64::MAX)
+                .unwrap();
+
+            device.destroy_fence(submit_fence, None);
+        }
+    }
+
     fn copy_buffer(
         device: &ash::Device,
         queue: vk::Queue,
@@ -1342,35 +1401,116 @@ impl Renderer {
                 .command_pool(transient_cmd_pool)
                 .level(vk::CommandBufferLevel::PRIMARY)
                 .command_buffer_count(1);
-
             let transfer_cmd_buf = device.allocate_command_buffers(&buf_alloc_info).unwrap();
-            let begin_info = vk::CommandBufferBeginInfo::builder()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            device
-                .begin_command_buffer(transfer_cmd_buf[0], &begin_info)
-                .unwrap();
 
-            let copy_region = [vk::BufferCopy {
-                src_offset: 0,
-                dst_offset: 0,
-                size,
-                ..Default::default()
-            }];
+            Renderer::do_single_command(
+                device,
+                transfer_cmd_buf[0],
+                queue,
+                |device, transfer_cmd_buf| {
+                    let copy_region = [vk::BufferCopy {
+                        src_offset: 0,
+                        dst_offset: 0,
+                        size,
+                        ..Default::default()
+                    }];
 
-            device.cmd_copy_buffer(transfer_cmd_buf[0], src, dst, &copy_region);
-
-            device.end_command_buffer(transfer_cmd_buf[0]).unwrap();
-
-            let submit_info = [vk::SubmitInfo::builder()
-                .command_buffers(&transfer_cmd_buf)
-                .build()];
-
-            device
-                .queue_submit(queue, &submit_info, vk::Fence::null())
-                .unwrap();
-            device.queue_wait_idle(queue).unwrap();
+                    device.cmd_copy_buffer(transfer_cmd_buf, src, dst, &copy_region);
+                },
+            );
 
             // NOTE: Would need to free command buffer if not for this
+            device.destroy_command_pool(transient_cmd_pool, None);
+        }
+    }
+
+    fn create_image(
+        device: &ash::Device,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        tiling: vk::ImageTiling,
+        usage: vk::ImageUsageFlags,
+        props: vk::MemoryPropertyFlags,
+        physical_props: vk::PhysicalDeviceMemoryProperties,
+    ) -> Option<(vk::Image, vk::DeviceMemory)> {
+        unsafe {
+            let image_info = vk::ImageCreateInfo::builder()
+                .image_type(vk::ImageType::TYPE_2D)
+                .extent(vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .format(format)
+                .tiling(tiling)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .usage(usage)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .samples(vk::SampleCountFlags::TYPE_1);
+
+            let image = device.create_image(&image_info, None).unwrap();
+
+            let mem_requirements = device.get_image_memory_requirements(image);
+            let alloc_info = vk::MemoryAllocateInfo::builder()
+                .allocation_size(mem_requirements.size)
+                .memory_type_index(
+                    find_memorytype_index(&mem_requirements, &physical_props, props).unwrap(),
+                );
+
+            let image_mem = device.allocate_memory(&alloc_info, None).unwrap();
+
+            device.bind_image_memory(image, image_mem, 0);
+
+            Some((image, image_mem))
+        }
+    }
+
+    fn transition_image_layout(device: &ash::Device, queue: vk::Queue, queue_family_index: u32, image: vk::Image, format: vk::Format, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout) {
+        unsafe {
+            // NOTE: Separate command pool for transient buffers?
+            //       would need to store this
+            let cmd_pool_info = vk::CommandPoolCreateInfo::builder()
+                .queue_family_index(queue_family_index)
+                .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+            let transient_cmd_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
+
+            let transition_buf_info = vk::CommandBufferAllocateInfo::builder()
+                .command_pool(transient_cmd_pool)
+                .command_buffer_count(1)
+                .level(vk::CommandBufferLevel::PRIMARY);
+
+            let transition_buf = device.allocate_command_buffers(&transition_buf_info).unwrap();
+
+            Renderer::do_single_command(device, transition_buf[0], queue, |device, transition_buf| {
+                let barrier = vk::ImageMemoryBarrier::builder()
+                    .old_layout(old_layout)
+                    .new_layout(new_layout)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                        ..Default::default()
+                    })
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::empty());
+
+                device.cmd_pipeline_barrier(transition_buf,
+                    vk::PipelineStageFlags::empty(),
+                    vk::PipelineStageFlags::empty(),
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[barrier.build()]);
+            });
+
             device.destroy_command_pool(transient_cmd_pool, None);
         }
     }
