@@ -583,7 +583,6 @@ impl Renderer {
 
             let mem_properties = instance.get_physical_device_memory_properties(physical_device);
 
-
             // Vertex buffer
             let buffer_size = (mem::size_of::<Vertex>() * VERTICES.len()) as u64;
 
@@ -786,13 +785,35 @@ impl Renderer {
             )
             .unwrap();
 
-            let transition_buf_info = vk::CommandBufferAllocateInfo::builder()
-                .command_pool(command_pool)
-                .command_buffer_count(1)
-                .level(vk::CommandBufferLevel::PRIMARY);
+            Renderer::transition_image_layout(
+                &device,
+                present_queue,
+                queue_family_index as u32,
+                texture_image,
+                vk::Format::R8G8B8A8_SRGB,
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            );
 
-            let transition_buf = device.allocate_command_buffers(&transition_buf_info).unwrap();
+            Renderer::copy_buffer_to_image(
+                &device,
+                present_queue,
+                queue_family_index as u32,
+                staging_buffer,
+                texture_image,
+                image.width(),
+                image.height(),
+            );
 
+            Renderer::transition_image_layout(
+                &device,
+                present_queue,
+                queue_family_index as u32,
+                texture_image,
+                vk::Format::R8G8B8A8_SRGB,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            );
 
             // Command buffers
             // One buffer for each framebuffer
@@ -873,7 +894,7 @@ impl Renderer {
             for _ in 0..frames_in_flight {
                 image_available_sems.push(device.create_semaphore(&semaphore_info, None).unwrap());
             }
-            for _ in 0..frames_in_flight {
+            for _i in 0..frames_in_flight {
                 render_finished_sems.push(device.create_semaphore(&semaphore_info, None).unwrap());
             }
 
@@ -913,6 +934,8 @@ impl Renderer {
                 index_buffer_mem,
                 uniform_buffers,
                 uniform_buffers_mem,
+                texture_image,
+                texture_image_mem,
                 descriptor_pool,
                 descriptor_sets,
                 frames_in_flight,
@@ -1391,7 +1414,7 @@ impl Renderer {
             //       would need to store this
             let cmd_pool_info = vk::CommandPoolCreateInfo::builder()
                 .queue_family_index(queue_family_index)
-                .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+                .flags(vk::CommandPoolCreateFlags::TRANSIENT | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
             let transient_cmd_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
             let buf_alloc_info = vk::CommandBufferAllocateInfo::builder()
                 .command_pool(transient_cmd_pool)
@@ -1458,13 +1481,85 @@ impl Renderer {
 
             let image_mem = device.allocate_memory(&alloc_info, None).unwrap();
 
-            device.bind_image_memory(image, image_mem, 0);
+            device.bind_image_memory(image, image_mem, 0).unwrap();
 
             Some((image, image_mem))
         }
     }
 
-    fn transition_image_layout(device: &ash::Device, queue: vk::Queue, queue_family_index: u32, image: vk::Image, format: vk::Format, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout) {
+    fn transition_image_layout(
+        device: &ash::Device,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        image: vk::Image,
+        format: vk::Format,
+        old_layout: vk::ImageLayout,
+        new_layout: vk::ImageLayout,
+    ) {
+        unsafe {
+            // NOTE: Separate command pool for transient buffers?
+            //       would need to store this
+            let cmd_pool_info = vk::CommandPoolCreateInfo::builder()
+                .queue_family_index(queue_family_index)
+                .flags(vk::CommandPoolCreateFlags::TRANSIENT | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+            let transient_cmd_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
+
+            let transition_buf_info = vk::CommandBufferAllocateInfo::builder()
+                .command_pool(transient_cmd_pool)
+                .command_buffer_count(1)
+                .level(vk::CommandBufferLevel::PRIMARY);
+
+            let transition_buf = device
+                .allocate_command_buffers(&transition_buf_info)
+                .unwrap();
+
+            Renderer::do_single_command(
+                device,
+                transition_buf[0],
+                queue,
+                |device, transition_buf| {
+                    let barrier = vk::ImageMemoryBarrier::builder()
+                        .old_layout(old_layout)
+                        .new_layout(new_layout)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(image)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                            ..Default::default()
+                        })
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::empty());
+
+                    device.cmd_pipeline_barrier(
+                        transition_buf,
+                        vk::PipelineStageFlags::empty(),
+                        vk::PipelineStageFlags::empty(),
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[barrier.build()],
+                    );
+                },
+            );
+
+            device.destroy_command_pool(transient_cmd_pool, None);
+        }
+    }
+
+    fn copy_buffer_to_image(
+        device: &ash::Device,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        buffer: vk::Buffer,
+        image: vk::Image,
+        width: u32,
+        height: u32,
+    ) {
         unsafe {
             // NOTE: Separate command pool for transient buffers?
             //       would need to store this
@@ -1473,38 +1568,39 @@ impl Renderer {
                 .flags(vk::CommandPoolCreateFlags::TRANSIENT);
             let transient_cmd_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
 
-            let transition_buf_info = vk::CommandBufferAllocateInfo::builder()
+            let cmd_buf_info = vk::CommandBufferAllocateInfo::builder()
                 .command_pool(transient_cmd_pool)
                 .command_buffer_count(1)
                 .level(vk::CommandBufferLevel::PRIMARY);
 
-            let transition_buf = device.allocate_command_buffers(&transition_buf_info).unwrap();
+            let cmd_buf = device.allocate_command_buffers(&cmd_buf_info).unwrap();
 
-            Renderer::do_single_command(device, transition_buf[0], queue, |device, transition_buf| {
-                let barrier = vk::ImageMemoryBarrier::builder()
-                    .old_layout(old_layout)
-                    .new_layout(new_layout)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(image)
-                    .subresource_range(vk::ImageSubresourceRange {
+            Renderer::do_single_command(device, cmd_buf[0], queue, |device, cmd_buf| {
+                let copy_region = vk::BufferImageCopy::builder()
+                    .buffer_offset(0)
+                    .buffer_row_length(0)
+                    .buffer_image_height(0)
+                    .image_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
+                        mip_level: 0,
                         base_array_layer: 0,
-                        layer_count: 1,
+                        layer_count: 0,
                         ..Default::default()
                     })
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::empty());
+                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                    .image_extent(vk::Extent3D {
+                        width,
+                        height,
+                        depth: 1,
+                    });
 
-                device.cmd_pipeline_barrier(transition_buf,
-                    vk::PipelineStageFlags::empty(),
-                    vk::PipelineStageFlags::empty(),
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[barrier.build()]);
+                device.cmd_copy_buffer_to_image(
+                    cmd_buf,
+                    buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[copy_region.build()],
+                );
             });
 
             device.destroy_command_pool(transient_cmd_pool, None);
