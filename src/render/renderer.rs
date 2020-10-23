@@ -793,10 +793,6 @@ impl Renderer {
 
             let transition_buf = device.allocate_command_buffers(&transition_buf_info).unwrap();
 
-            Renderer::do_single_command(&device, transition_buf[0], present_queue, |device, transition_buf| {
-                let barrier = vk::ImageMemoryBarrier::builder()
-                    .old_layout(old_layout)
-            });
 
             // Command buffers
             // One buffer for each framebuffer
