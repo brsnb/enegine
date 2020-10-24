@@ -1414,7 +1414,10 @@ impl Renderer {
             //       would need to store this
             let cmd_pool_info = vk::CommandPoolCreateInfo::builder()
                 .queue_family_index(queue_family_index)
-                .flags(vk::CommandPoolCreateFlags::TRANSIENT | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+                .flags(
+                    vk::CommandPoolCreateFlags::TRANSIENT
+                        | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                );
             let transient_cmd_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
             let buf_alloc_info = vk::CommandBufferAllocateInfo::builder()
                 .command_pool(transient_cmd_pool)
@@ -1501,7 +1504,10 @@ impl Renderer {
             //       would need to store this
             let cmd_pool_info = vk::CommandPoolCreateInfo::builder()
                 .queue_family_index(queue_family_index)
-                .flags(vk::CommandPoolCreateFlags::TRANSIENT | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+                .flags(
+                    vk::CommandPoolCreateFlags::TRANSIENT
+                        | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                );
             let transient_cmd_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
 
             let transition_buf_info = vk::CommandBufferAllocateInfo::builder()
@@ -1518,31 +1524,53 @@ impl Renderer {
                 transition_buf[0],
                 queue,
                 |device, transition_buf| {
-                    let barrier = vk::ImageMemoryBarrier::builder()
-                        .old_layout(old_layout)
-                        .new_layout(new_layout)
-                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                        .image(image)
-                        .subresource_range(vk::ImageSubresourceRange {
+                    let mut barrier = vk::ImageMemoryBarrier {
+                        old_layout,
+                        new_layout,
+                        src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                        dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                        image,
+                        subresource_range: vk::ImageSubresourceRange {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
                             base_mip_level: 0,
                             level_count: 1,
                             base_array_layer: 0,
                             layer_count: 1,
                             ..Default::default()
-                        })
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::empty());
+                        },
+                        ..Default::default()
+                    };
+
+                    let source_stage;
+                    let dest_stage;
+
+                    if old_layout == vk::ImageLayout::UNDEFINED
+                        && new_layout == vk::ImageLayout::TRANSFER_DST_OPTIMAL
+                    {
+                        barrier.src_access_mask = vk::AccessFlags::empty();
+                        barrier.dst_access_mask = vk::AccessFlags::TRANSFER_WRITE;
+
+                        source_stage = vk::PipelineStageFlags::TOP_OF_PIPE;
+                        dest_stage = vk::PipelineStageFlags::TRANSFER;
+                    } else if old_layout == vk::ImageLayout::TRANSFER_DST_OPTIMAL
+                        && new_layout == vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL {
+                        barrier.src_access_mask = vk::AccessFlags::TRANSFER_WRITE;
+                        barrier.dst_access_mask = vk::AccessFlags::SHADER_READ;
+
+                        source_stage = vk::PipelineStageFlags::TRANSFER;
+                        dest_stage = vk::PipelineStageFlags::FRAGMENT_SHADER;
+                    } else {
+                        panic!("Undefined layout transition");
+                    }
 
                     device.cmd_pipeline_barrier(
                         transition_buf,
-                        vk::PipelineStageFlags::empty(),
-                        vk::PipelineStageFlags::empty(),
+                        source_stage,
+                        dest_stage,
                         vk::DependencyFlags::empty(),
                         &[],
                         &[],
-                        &[barrier.build()],
+                        &[barrier],
                     );
                 },
             );
