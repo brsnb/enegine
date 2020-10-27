@@ -18,6 +18,7 @@ lazy_static! {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct Vertex {
     pub position: Vec2,
     pub color: Vec3,
@@ -461,7 +462,7 @@ impl Renderer {
                     offset: offset_of!(Vertex, color) as u32,
                     ..Default::default()
                 },
-                 vk::VertexInputAttributeDescription {
+                vk::VertexInputAttributeDescription {
                     binding: 0,
                     location: 2,
                     format: vk::Format::R32G32_SFLOAT,
@@ -725,10 +726,12 @@ impl Renderer {
 
             // Texture image
             // FIXME: Lazy
-            let image = image::load_from_memory(include_bytes!("../bin/textures/uv_test.png"))
+            let image = image::load_from_memory(include_bytes!("../bin/textures/uv_test_1k.png"))
                 .unwrap()
                 .to_rgba();
-            let image_size = (mem::size_of::<u8>() * image.len()) as u64;
+            let image_dims = image.dimensions();
+            let image_data = image.into_raw();
+            let image_size = (mem::size_of::<u8>() * image_data.len()) as u64;
 
             let (staging_buffer, staging_buffer_mem) = Renderer::create_buffer(
                 &device,
@@ -748,14 +751,14 @@ impl Renderer {
                 )
                 .unwrap();
 
-            let mut align = ash::util::Align::new(data, image_size, image_size);
-            align.copy_from_slice(&image);
+            let mut align = ash::util::Align::new(data, mem::align_of::<u8>() as u64, device.get_buffer_memory_requirements(staging_buffer).size);
+            align.copy_from_slice(&image_data);
             device.unmap_memory(staging_buffer_mem);
 
             let (texture_image, texture_image_mem) = Renderer::create_image(
                 &device,
-                image.width(),
-                image.height(),
+                image_dims.0,
+                image_dims.1,
                 vk::Format::R8G8B8A8_SRGB,
                 vk::ImageTiling::OPTIMAL,
                 vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
@@ -780,8 +783,8 @@ impl Renderer {
                 queue_family_index as u32,
                 staging_buffer,
                 texture_image,
-                image.width(),
-                image.height(),
+                image_dims.0,
+                image_dims.1,
             );
 
             Renderer::transition_image_layout(
@@ -1244,10 +1247,16 @@ impl Renderer {
                 self.uniform_buffers_mem.push(buf_mem);
             }
             // Descriptor pool
-            let pool_sizes = [vk::DescriptorPoolSize::builder()
-                .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(self.present_images.len() as u32)
-                .build()];
+            let pool_sizes = [
+                vk::DescriptorPoolSize::builder()
+                    .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                    .descriptor_count(self.present_images.len() as u32)
+                    .build(),
+                vk::DescriptorPoolSize::builder()
+                    .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(self.present_images.len() as u32)
+                    .build(),
+            ];
 
             let pool_info = vk::DescriptorPoolCreateInfo::builder()
                 .pool_sizes(&pool_sizes)
@@ -1275,16 +1284,30 @@ impl Renderer {
                     .range(mem::size_of::<UniformBufferObject>() as u64)
                     .build();
 
-                let descriptor_writes = vk::WriteDescriptorSet::builder()
-                    .dst_set(*s)
-                    .dst_binding(0)
-                    .dst_array_element(0)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .buffer_info(&[buffer_info])
+                let image_info = vk::DescriptorImageInfo::builder()
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image_view(self.texture_image_view)
+                    .sampler(self.texture_sampler)
                     .build();
 
-                self.device
-                    .update_descriptor_sets(&[descriptor_writes], &[]);
+                let descriptor_writes = [
+                    vk::WriteDescriptorSet::builder()
+                        .dst_set(*s)
+                        .dst_binding(0)
+                        .dst_array_element(0)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .buffer_info(&[buffer_info])
+                        .build(),
+                    vk::WriteDescriptorSet::builder()
+                        .dst_set(*s)
+                        .dst_binding(1)
+                        .dst_array_element(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&[image_info])
+                        .build(),
+                ];
+
+                self.device.update_descriptor_sets(&descriptor_writes, &[]);
             }
 
             // One buffer for each framebuffer
@@ -1678,7 +1701,10 @@ impl Renderer {
             //       would need to store this
             let cmd_pool_info = vk::CommandPoolCreateInfo::builder()
                 .queue_family_index(queue_family_index)
-                .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+                .flags(
+                    vk::CommandPoolCreateFlags::TRANSIENT
+                        | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                );
             let transient_cmd_pool = device.create_command_pool(&cmd_pool_info, None).unwrap();
 
             let cmd_buf_info = vk::CommandBufferAllocateInfo::builder()
@@ -1697,7 +1723,7 @@ impl Renderer {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         mip_level: 0,
                         base_array_layer: 0,
-                        layer_count: 0,
+                        layer_count: 1,
                         ..Default::default()
                     })
                     .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
