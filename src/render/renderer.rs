@@ -21,6 +21,7 @@ lazy_static! {
 pub struct Vertex {
     pub position: Vec2,
     pub color: Vec3,
+    pub tex_coord: Vec2,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -35,19 +36,23 @@ lazy_static! {
     static ref VERTICES: Vec<Vertex> = vec![
         Vertex {
             position: Vec2::new(-0.5, -0.5),
-            color: Vec3::new(1.0, 0.0, 0.0)
+            color: Vec3::new(1.0, 0.0, 0.0),
+            tex_coord: Vec2::new(0.0, 0.0),
         },
         Vertex {
             position: Vec2::new(0.5, -0.5),
             color: Vec3::new(0.0, 1.0, 0.0),
+            tex_coord: Vec2::new(1.0, 0.0),
         },
         Vertex {
             position: Vec2::new(0.5, 0.5),
             color: Vec3::new(0.0, 0.0, 1.0),
+            tex_coord: Vec2::new(1.0, 1.0),
         },
         Vertex {
             position: Vec2::new(-0.5, 0.5),
             color: Vec3::new(1.0, 1.0, 1.0),
+            tex_coord: Vec2::new(0.0, 1.0),
         },
     ];
 }
@@ -93,6 +98,8 @@ pub struct Renderer {
 
     texture_image: vk::Image,
     texture_image_mem: vk::DeviceMemory,
+    texture_image_view: vk::ImageView,
+    texture_sampler: vk::Sampler,
 
     descriptor_pool: vk::DescriptorPool,
     descriptor_sets: Vec<vk::DescriptorSet>,
@@ -454,6 +461,13 @@ impl Renderer {
                     offset: offset_of!(Vertex, color) as u32,
                     ..Default::default()
                 },
+                 vk::VertexInputAttributeDescription {
+                    binding: 0,
+                    location: 2,
+                    format: vk::Format::R32G32_SFLOAT,
+                    offset: offset_of!(Vertex, tex_coord) as u32,
+                    ..Default::default()
+                },
             ];
 
             let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::builder()
@@ -522,15 +536,24 @@ impl Renderer {
                 .attachments(&color_blend_attachment);
 
             // Descriptor set
-            let ubo_layout_bindings = [vk::DescriptorSetLayoutBinding::builder()
+            let ubo_layout_binding = vk::DescriptorSetLayoutBinding::builder()
                 .binding(0)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .stage_flags(vk::ShaderStageFlags::VERTEX)
                 .descriptor_count(1)
-                .build()];
+                .build();
+
+            let sampler_layout_binding = vk::DescriptorSetLayoutBinding::builder()
+                .binding(1)
+                .descriptor_count(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build();
+
+            let layout_bindings = [ubo_layout_binding, sampler_layout_binding];
 
             let layout_info =
-                vk::DescriptorSetLayoutCreateInfo::builder().bindings(&ubo_layout_bindings);
+                vk::DescriptorSetLayoutCreateInfo::builder().bindings(&layout_bindings);
 
             let descriptor_set_layout = device
                 .create_descriptor_set_layout(&layout_info, None)
@@ -694,50 +717,6 @@ impl Renderer {
                 uniform_buffers_mem.push(buf_mem);
             }
 
-            // Descriptor pool
-            let pool_sizes = [vk::DescriptorPoolSize::builder()
-                .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(present_images.len() as u32)
-                .build()];
-
-            let pool_info = vk::DescriptorPoolCreateInfo::builder()
-                .pool_sizes(&pool_sizes)
-                .max_sets(present_images.len() as u32);
-
-            let descriptor_pool = device.create_descriptor_pool(&pool_info, None).unwrap();
-
-            // Descriptor sets
-            let mut descriptor_set_layouts = Vec::with_capacity(present_images.len());
-            for _i in 0..descriptor_set_layouts.capacity() {
-                descriptor_set_layouts.push(descriptor_set_layout);
-            }
-
-            let descriptor_set_info = vk::DescriptorSetAllocateInfo::builder()
-                .descriptor_pool(descriptor_pool)
-                .set_layouts(&descriptor_set_layouts);
-
-            let descriptor_sets = device
-                .allocate_descriptor_sets(&descriptor_set_info)
-                .unwrap();
-
-            for (i, s) in descriptor_sets.iter().enumerate() {
-                let buffer_info = vk::DescriptorBufferInfo::builder()
-                    .buffer(uniform_buffers[i])
-                    .offset(0)
-                    .range(mem::size_of::<UniformBufferObject>() as u64)
-                    .build();
-
-                let descriptor_writes = vk::WriteDescriptorSet::builder()
-                    .dst_set(*s)
-                    .dst_binding(0)
-                    .dst_array_element(0)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .buffer_info(&[buffer_info])
-                    .build();
-
-                device.update_descriptor_sets(&[descriptor_writes], &[]);
-            }
-
             // Command pool
             let cmd_pool_info =
                 vk::CommandPoolCreateInfo::builder().queue_family_index(queue_family_index as u32);
@@ -814,6 +793,109 @@ impl Renderer {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             );
+
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_buffer_mem, None);
+
+            // Texture image view
+            let view_info = vk::ImageViewCreateInfo::builder()
+                .image(texture_image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(vk::Format::R8G8B8A8_SRGB)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+
+            let texture_image_view = device.create_image_view(&view_info, None).unwrap();
+
+            // Texture sampler
+            let sampler_info = vk::SamplerCreateInfo::builder()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                .address_mode_w(vk::SamplerAddressMode::REPEAT)
+                .anisotropy_enable(false)
+                .max_anisotropy(16.0_f32)
+                .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+                .unnormalized_coordinates(false)
+                .compare_enable(false)
+                .compare_op(vk::CompareOp::ALWAYS)
+                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                .mip_lod_bias(0.0_f32)
+                .min_lod(0.0_f32)
+                .max_lod(0.0_f32);
+
+            let texture_sampler = device.create_sampler(&sampler_info, None).unwrap();
+
+            // Descriptor pool
+            let pool_sizes = [
+                vk::DescriptorPoolSize::builder()
+                    .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                    .descriptor_count(present_images.len() as u32)
+                    .build(),
+                vk::DescriptorPoolSize::builder()
+                    .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(present_images.len() as u32)
+                    .build(),
+            ];
+
+            let pool_info = vk::DescriptorPoolCreateInfo::builder()
+                .pool_sizes(&pool_sizes)
+                .max_sets(present_images.len() as u32);
+
+            let descriptor_pool = device.create_descriptor_pool(&pool_info, None).unwrap();
+
+            // Descriptor sets
+            let mut descriptor_set_layouts = Vec::with_capacity(present_images.len());
+            for _i in 0..descriptor_set_layouts.capacity() {
+                descriptor_set_layouts.push(descriptor_set_layout);
+            }
+
+            let descriptor_set_info = vk::DescriptorSetAllocateInfo::builder()
+                .descriptor_pool(descriptor_pool)
+                .set_layouts(&descriptor_set_layouts);
+
+            let descriptor_sets = device
+                .allocate_descriptor_sets(&descriptor_set_info)
+                .unwrap();
+
+            for (i, s) in descriptor_sets.iter().enumerate() {
+                let buffer_info = vk::DescriptorBufferInfo::builder()
+                    .buffer(uniform_buffers[i])
+                    .offset(0)
+                    .range(mem::size_of::<UniformBufferObject>() as u64)
+                    .build();
+
+                let image_info = vk::DescriptorImageInfo::builder()
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image_view(texture_image_view)
+                    .sampler(texture_sampler)
+                    .build();
+
+                let descriptor_writes = [
+                    vk::WriteDescriptorSet::builder()
+                        .dst_set(*s)
+                        .dst_binding(0)
+                        .dst_array_element(0)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                        .buffer_info(&[buffer_info])
+                        .build(),
+                    vk::WriteDescriptorSet::builder()
+                        .dst_set(*s)
+                        .dst_binding(1)
+                        .dst_array_element(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&[image_info])
+                        .build(),
+                ];
+
+                device.update_descriptor_sets(&descriptor_writes, &[]);
+            }
 
             // Command buffers
             // One buffer for each framebuffer
@@ -936,6 +1018,8 @@ impl Renderer {
                 uniform_buffers_mem,
                 texture_image,
                 texture_image_mem,
+                texture_image_view,
+                texture_sampler,
                 descriptor_pool,
                 descriptor_sets,
                 frames_in_flight,
@@ -1553,7 +1637,8 @@ impl Renderer {
                         source_stage = vk::PipelineStageFlags::TOP_OF_PIPE;
                         dest_stage = vk::PipelineStageFlags::TRANSFER;
                     } else if old_layout == vk::ImageLayout::TRANSFER_DST_OPTIMAL
-                        && new_layout == vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL {
+                        && new_layout == vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+                    {
                         barrier.src_access_mask = vk::AccessFlags::TRANSFER_WRITE;
                         barrier.dst_access_mask = vk::AccessFlags::SHADER_READ;
 
@@ -1641,6 +1726,11 @@ impl Drop for Renderer {
         unsafe {
             self.device.device_wait_idle().unwrap();
             self.destroy_swapchain();
+            self.device.destroy_sampler(self.texture_sampler, None);
+            self.device
+                .destroy_image_view(self.texture_image_view, None);
+            self.device.destroy_image(self.texture_image, None);
+            self.device.free_memory(self.texture_image_mem, None);
             self.device.destroy_pipeline(self.graphics_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
