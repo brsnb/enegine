@@ -20,7 +20,7 @@ lazy_static! {
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct Vertex {
-    pub position: Vec2,
+    pub position: Vec3,
     pub color: Vec3,
     pub tex_coord: Vec2,
 }
@@ -36,29 +36,49 @@ pub struct UniformBufferObject {
 lazy_static! {
     static ref VERTICES: Vec<Vertex> = vec![
         Vertex {
-            position: Vec2::new(-0.5, -0.5),
+            position: Vec3::new(-0.5, -0.5, 0.0),
             color: Vec3::new(1.0, 0.0, 0.0),
             tex_coord: Vec2::new(0.0, 0.0),
         },
         Vertex {
-            position: Vec2::new(0.5, -0.5),
+            position: Vec3::new(0.5, -0.5, 0.0),
             color: Vec3::new(0.0, 1.0, 0.0),
             tex_coord: Vec2::new(1.0, 0.0),
         },
         Vertex {
-            position: Vec2::new(0.5, 0.5),
+            position: Vec3::new(0.5, 0.5, 0.0),
             color: Vec3::new(0.0, 0.0, 1.0),
             tex_coord: Vec2::new(1.0, 1.0),
         },
         Vertex {
-            position: Vec2::new(-0.5, 0.5),
+            position: Vec3::new(-0.5, 0.5, 0.0),
+            color: Vec3::new(1.0, 1.0, 1.0),
+            tex_coord: Vec2::new(0.0, 1.0),
+        },
+        Vertex {
+            position: Vec3::new(-0.5, -0.5, -0.5),
+            color: Vec3::new(1.0, 0.0, 0.0),
+            tex_coord: Vec2::new(0.0, 0.0),
+        },
+        Vertex {
+            position: Vec3::new(0.5, -0.5, -0.5),
+            color: Vec3::new(0.0, 1.0, 0.0),
+            tex_coord: Vec2::new(1.0, 0.0),
+        },
+        Vertex {
+            position: Vec3::new(0.5, 0.5, -0.5),
+            color: Vec3::new(0.0, 0.0, 1.0),
+            tex_coord: Vec2::new(1.0, 1.0),
+        },
+        Vertex {
+            position: Vec3::new(-0.5, 0.5, -0.5),
             color: Vec3::new(1.0, 1.0, 1.0),
             tex_coord: Vec2::new(0.0, 1.0),
         },
     ];
 }
 
-static INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
+static INDICES: [u16; 12] = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4];
 
 pub struct Renderer {
     entry: ash::Entry,
@@ -101,6 +121,10 @@ pub struct Renderer {
     texture_image_mem: vk::DeviceMemory,
     texture_image_view: vk::ImageView,
     texture_sampler: vk::Sampler,
+
+    depth_image: vk::Image,
+    depth_image_mem: vk::DeviceMemory,
+    depth_image_view: vk::ImageView,
 
     descriptor_pool: vk::DescriptorPool,
     descriptor_sets: Vec<vk::DescriptorSet>,
@@ -451,7 +475,7 @@ impl Renderer {
                 vk::VertexInputAttributeDescription {
                     binding: 0,
                     location: 0,
-                    format: vk::Format::R32G32_SFLOAT,
+                    format: vk::Format::R32G32B32_SFLOAT,
                     offset: offset_of!(Vertex, position) as u32,
                     ..Default::default()
                 },
@@ -751,7 +775,11 @@ impl Renderer {
                 )
                 .unwrap();
 
-            let mut align = ash::util::Align::new(data, mem::align_of::<u8>() as u64, device.get_buffer_memory_requirements(staging_buffer).size);
+            let mut align = ash::util::Align::new(
+                data,
+                mem::align_of::<u8>() as u64,
+                device.get_buffer_memory_requirements(staging_buffer).size,
+            );
             align.copy_from_slice(&image_data);
             device.unmap_memory(staging_buffer_mem);
 
@@ -834,6 +862,19 @@ impl Renderer {
                 .max_lod(0.0_f32);
 
             let texture_sampler = device.create_sampler(&sampler_info, None).unwrap();
+
+            // Depth image
+            let (depth_image, depth_image_mem) = Renderer::create_image(
+                &device,
+                surface_extent.height,
+                surface_extent.width,
+                vk::Format::D32_SFLOAT,
+                vk::ImageTiling::OPTIMAL,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                mem_properties,
+            )
+            .unwrap();
 
             // Descriptor pool
             let pool_sizes = [
@@ -1062,14 +1103,14 @@ impl Renderer {
             //let current_time = std::time::Instant::now();
             //let time = current_time.duration_since(*START_TIME).as_secs();
 
-            let ubo = UniformBufferObject {
-                model: glam::Mat4::from_rotation_z(90.0_f32.to_radians()),
-                view: glam::Mat4::look_at_lh(
+            let mut ubo = UniformBufferObject {
+                model: glam::Mat4::from_rotation_z(0.0_f32.to_radians()),
+                view: glam::Mat4::look_at_rh(
                     Vec3::new(2.0, 2.0, 2.0),
                     Vec3::new(0.0, 0.0, 0.0),
                     Vec3::new(0.0, 0.0, 1.0),
                 ),
-                proj: glam::Mat4::perspective_lh(
+                proj: glam::Mat4::perspective_rh(
                     45.0_f32.to_radians(),
                     self.surface_extent.width as f32 / self.surface_extent.height as f32,
                     0.1,
