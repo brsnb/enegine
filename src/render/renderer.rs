@@ -13,10 +13,6 @@ use std::mem;
 
 use glam::{Mat4, Vec2, Vec3};
 
-lazy_static! {
-    static ref START_TIME: std::time::Instant = std::time::Instant::now();
-}
-
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct Vertex {
@@ -110,10 +106,14 @@ pub struct Renderer {
 
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
+
+    vertices: Vec<Vertex>,
+    indices: Vec<u32>,
     vertex_buffer: vk::Buffer,
     vertex_buffer_mem: vk::DeviceMemory,
     index_buffer: vk::Buffer,
     index_buffer_mem: vk::DeviceMemory,
+
     uniform_buffers: Vec<vk::Buffer>,
     uniform_buffers_mem: Vec<vk::DeviceMemory>,
 
@@ -765,7 +765,7 @@ impl Renderer {
 
             // Texture image
             // FIXME: Lazy
-            let image = image::load_from_memory(include_bytes!("../bin/textures/uv_test_1k.png"))
+            let image = image::load_from_memory(include_bytes!("../bin/textures/viking_room.png"))
                 .unwrap()
                 .to_rgba();
             let image_dims = image.dimensions();
@@ -1042,7 +1042,7 @@ impl Renderer {
                 device.cmd_bind_vertex_buffers(*buffer, 0, &vertex_buffers, &offsets);
 
                 // Bind index buffer
-                device.cmd_bind_index_buffer(*buffer, index_buffer, 0, vk::IndexType::UINT16);
+                device.cmd_bind_index_buffer(*buffer, index_buffer, 0, vk::IndexType::UINT32);
 
                 // Dynamic state
                 device.cmd_set_viewport(*buffer, 0, &viewport);
@@ -1289,7 +1289,6 @@ impl Renderer {
             )
             .unwrap();
 
-
             // Depth image view
             let view_info = vk::ImageViewCreateInfo::builder()
                 .image(depth_image)
@@ -1502,7 +1501,7 @@ impl Renderer {
                     *buffer,
                     self.index_buffer,
                     0,
-                    vk::IndexType::UINT16,
+                    vk::IndexType::UINT32,
                 );
 
                 let viewport = [vk::Viewport::builder()
@@ -1926,6 +1925,20 @@ impl Drop for Renderer {
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
+    }
+}
+
+pub fn load_model() {
+    let model = obj::Obj::load("../bin/models/viking_room.obj").unwrap();
+    let mut vertices = Vec::with_capacity(model.data.position.len());
+    let mut indices = Vec::with_capacity(model.data.position.len());
+
+    for (i, vert) in model.data.position.iter().enumerate() {
+        vertices.push(Vertex {
+            position: Vec3::new(vert[0], vert[1], vert[2]),
+            color: Vec3::zero(),
+            tex_coord: Vec2::new(model.data.texture[i][0], model.data.texture[i][1]),
+        })
     }
 }
 
