@@ -117,6 +117,7 @@ pub struct Renderer {
     uniform_buffers: Vec<vk::Buffer>,
     uniform_buffers_mem: Vec<vk::DeviceMemory>,
 
+    mip_levels: u32,
     texture_image: vk::Image,
     texture_image_mem: vk::DeviceMemory,
     texture_image_view: vk::ImageView,
@@ -646,8 +647,11 @@ impl Renderer {
 
             let mem_properties = instance.get_physical_device_memory_properties(physical_device);
 
+            // Load model
+            let (vertices, indices) = load_model();
+
             // Vertex buffer
-            let buffer_size = (mem::size_of::<Vertex>() * VERTICES.len()) as u64;
+            let buffer_size = (mem::size_of::<Vertex>() * vertices.len()) as u64;
 
             let (staging_buffer, staging_buffer_mem) = Renderer::create_buffer(
                 &device,
@@ -669,7 +673,7 @@ impl Renderer {
 
             let mut align =
                 ash::util::Align::new(data, mem::align_of::<Vertex>() as u64, buffer_size);
-            align.copy_from_slice(&VERTICES);
+            align.copy_from_slice(&vertices);
             device.unmap_memory(staging_buffer_mem);
 
             let (vertex_buffer, vertex_buffer_mem) = Renderer::create_buffer(
@@ -694,7 +698,7 @@ impl Renderer {
             device.free_memory(staging_buffer_mem, None);
 
             // Index buffer
-            let buffer_size = (mem::size_of::<Vertex>() * INDICES.len()) as u64;
+            let buffer_size = (mem::size_of::<Vertex>() * indices.len()) as u64;
 
             let (staging_buffer, staging_buffer_mem) = Renderer::create_buffer(
                 &device,
@@ -715,7 +719,7 @@ impl Renderer {
                 .unwrap();
 
             let mut align = ash::util::Align::new(data, mem::align_of::<u16>() as u64, buffer_size);
-            align.copy_from_slice(&INDICES);
+            align.copy_from_slice(&indices);
             device.unmap_memory(staging_buffer_mem);
 
             let (index_buffer, index_buffer_mem) = Renderer::create_buffer(
@@ -765,12 +769,13 @@ impl Renderer {
 
             // Texture image
             // FIXME: Lazy
-            let image = image::load_from_memory(include_bytes!("../bin/textures/viking_room.png"))
+            let image = image::load_from_memory(include_bytes!("../bin/textures/uv_test_1k.png"))
                 .unwrap()
                 .to_rgba();
             let image_dims = image.dimensions();
             let image_data = image.into_raw();
             let image_size = (mem::size_of::<u8>() * image_data.len()) as u64;
+            let mip_levels = (image_dims.0.max(image_dims.1) as f32).log2().floor() as u32 + 1;
 
             let (staging_buffer, staging_buffer_mem) = Renderer::create_buffer(
                 &device,
@@ -802,6 +807,7 @@ impl Renderer {
                 &device,
                 image_dims.0,
                 image_dims.1,
+                mip_levels,
                 vk::Format::R8G8B8A8_SRGB,
                 vk::ImageTiling::OPTIMAL,
                 vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
@@ -815,6 +821,7 @@ impl Renderer {
                 present_queue,
                 queue_family_index as u32,
                 texture_image,
+                mip_levels,
                 vk::Format::R8G8B8A8_SRGB,
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -835,6 +842,7 @@ impl Renderer {
                 present_queue,
                 queue_family_index as u32,
                 texture_image,
+                mip_levels,
                 vk::Format::R8G8B8A8_SRGB,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
@@ -883,6 +891,7 @@ impl Renderer {
                 &device,
                 surface_extent.width,
                 surface_extent.height,
+                1,
                 vk::Format::D32_SFLOAT,
                 vk::ImageTiling::OPTIMAL,
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
@@ -1058,7 +1067,8 @@ impl Renderer {
                     &[],
                 );
 
-                device.cmd_draw_indexed(*buffer, INDICES.len() as u32, 1, 0, 0, 0);
+                //device.cmd_draw_indexed(*buffer, indices.len() as u32, 1, 0, 0, 0);
+                device.cmd_draw(*buffer, vertices.len() as u32, 1, 0, 0);
 
                 device.cmd_end_render_pass(*buffer);
 
@@ -1107,12 +1117,15 @@ impl Renderer {
                 framebuffers,
                 command_pool,
                 command_buffers,
+                vertices,
+                indices,
                 vertex_buffer,
                 vertex_buffer_mem,
                 index_buffer,
                 index_buffer_mem,
                 uniform_buffers,
                 uniform_buffers_mem,
+                mip_levels,
                 texture_image,
                 texture_image_mem,
                 texture_image_view,
@@ -1281,6 +1294,7 @@ impl Renderer {
                 &self.device,
                 self.surface_extent.width,
                 self.surface_extent.height,
+                1,
                 vk::Format::D32_SFLOAT,
                 vk::ImageTiling::OPTIMAL,
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
@@ -1532,9 +1546,10 @@ impl Renderer {
                     &[],
                 );
 
+                //self.device
+                //    .cmd_draw_indexed(*buffer, self.indices.len() as u32, 1, 0, 0, 0);
                 self.device
-                    .cmd_draw_indexed(*buffer, INDICES.len() as u32, 1, 0, 0, 0);
-
+                    .cmd_draw(*buffer, self.vertices.len() as u32, 1, 0, 0);
                 self.device.cmd_end_render_pass(*buffer);
 
                 self.device.end_command_buffer(*buffer).unwrap();
@@ -1696,6 +1711,7 @@ impl Renderer {
         device: &ash::Device,
         width: u32,
         height: u32,
+        mip_levels: u32,
         format: vk::Format,
         tiling: vk::ImageTiling,
         usage: vk::ImageUsageFlags,
@@ -1741,6 +1757,7 @@ impl Renderer {
         queue: vk::Queue,
         queue_family_index: u32,
         image: vk::Image,
+        mip_levels: u32,
         format: vk::Format,
         old_layout: vk::ImageLayout,
         new_layout: vk::ImageLayout,
@@ -1928,18 +1945,31 @@ impl Drop for Renderer {
     }
 }
 
-pub fn load_model() {
-    let model = obj::Obj::load("../bin/models/viking_room.obj").unwrap();
+pub fn load_model() -> (Vec<Vertex>, Vec<u32>) {
+    println!("STARTED LOAD");
+    let model =
+        obj::Obj::load("/home/bn/projects/ency/enegine/src/bin/models/viking_room.obj").unwrap();
     let mut vertices = Vec::with_capacity(model.data.position.len());
     let mut indices = Vec::with_capacity(model.data.position.len());
 
-    for (i, vert) in model.data.position.iter().enumerate() {
-        vertices.push(Vertex {
-            position: Vec3::new(vert[0], vert[1], vert[2]),
-            color: Vec3::zero(),
-            tex_coord: Vec2::new(model.data.texture[i][0], model.data.texture[i][1]),
-        })
+    for o in model.data.objects {
+        for g in o.groups {
+            for poly in g.polys {
+                for index in &poly.0 {
+                    let vert = model.data.position[index.0];
+                    let tex = model.data.texture[index.1.unwrap()];
+                    vertices.push(Vertex {
+                        position: Vec3::new(vert[0], vert[1], vert[2]),
+                        color: Vec3::zero(),
+                        tex_coord: Vec2::new(tex[0], 1.0 - tex[1]),
+                    });
+                    indices.push(0 as u32);
+                }
+            }
+        }
     }
+    println!("ENDED LOAD");
+    (vertices, indices)
 }
 
 pub fn find_memorytype_index(
