@@ -2,7 +2,6 @@ use ash::extensions::{
     ext::DebugUtils,
     khr::{Surface, Swapchain},
 };
-use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
 use ash::{util, vk};
 use ash_window;
 
@@ -75,6 +74,20 @@ lazy_static! {
 }
 
 static INDICES: [u16; 12] = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4];
+
+pub struct Core {
+    pub entry: ash::Entry,
+    pub instance: ash::Instance,
+    pub device: ash::Device,
+
+    pub physical_device: vk::PhysicalDevice,
+}
+
+impl Core {
+    fn new() {
+        
+    }
+}
 
 pub struct Renderer {
     entry: ash::Entry,

@@ -1,28 +1,22 @@
 use ash::extensions::khr::{Surface, Swapchain};
 use ash::vk;
 
+use std::ffi::CStr;
+
 pub struct Window {
-    window: winit::window::Window,
+    pub window: winit::window::Window,
 
-    surface_loader: Surface,
-    surface: vk::SurfaceKHR,
-    surface_format: vk::Format,
-    surface_extent: vk::Extent2D,
-
-    swapchain_loader: Swapchain,
-    swapchain: vk::SwapchainKHR,
-    swapchain_images: Vec<vk::Image>,
-    swapchain_image_views: Vec<vk::ImageView>,
-
-    frames_in_flight: usize,
-    current_frame: usize,
-    in_flight_fences: Vec<vk::Fence>,
-    image_available_sems: Vec<vk::Semaphore>,
-    render_finished_sems: Vec<vk::Semaphore>,
+    pub surface_fn: Surface,
+    pub surface: vk::SurfaceKHR,
+    pub surface_format: vk::Format,
+    pub surface_extent: vk::Extent2D,
 }
 
 impl Window {
-    pub fn new() -> Result<(), &'static str> {
+    pub fn new(window: &winit::window::Window) -> Result<(), &'static str> {
+        unsafe {
+            
+        }
         Ok(())
     }
 }
