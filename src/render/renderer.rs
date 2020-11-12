@@ -12,6 +12,8 @@ use std::mem;
 
 use glam::{Mat4, Vec2, Vec3};
 
+use super::device;
+
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct Vertex {
@@ -78,14 +80,138 @@ static INDICES: [u16; 12] = [0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4];
 pub struct Core {
     pub entry: ash::Entry,
     pub instance: ash::Instance,
-    pub device: ash::Device,
-
-    pub physical_device: vk::PhysicalDevice,
+    pub device: device::Device,
 }
 
 impl Core {
-    fn new() {
-        
+    fn new(window: &winit::window::Window) {
+        let entry = ash::Entry::new().unwrap();
+
+        unsafe {
+            // Instance
+            let app_name = to_cstr!("enegine");
+            let app_info = vk::ApplicationInfo::builder()
+                .application_name(app_name)
+                .application_version(0)
+                .engine_name(app_name)
+                .engine_version(0)
+                .api_version(vk::make_version(1, 0, 0));
+
+            let mut surface_extensions = ash_window::enumerate_required_extensions(window).unwrap();
+            info!("Surface required extensions: {:?}", surface_extensions);
+
+            // Check for debug
+            let supported_extensions = entry.enumerate_instance_extension_properties().unwrap();
+            let debug_enabled = supported_extensions
+                .iter()
+                .any(|ext| CStr::from_ptr(ext.extension_name.as_ptr()) == DebugUtils::name());
+
+            if debug_enabled {
+                info!("Debug enabled");
+                surface_extensions.push(DebugUtils::name());
+            } else {
+                info!("Debug not available");
+            };
+
+            let surface_extensions_raw = surface_extensions
+                .iter()
+                .map(|ext| ext.as_ptr())
+                .collect::<Vec<_>>();
+
+            // Enable validation layers
+            let supported_layers = entry.enumerate_instance_layer_properties().unwrap();
+
+            // FIXME
+            let validation_layers = to_cstr!("VK_LAYER_KHRONOS_validation");
+            let enabled_layers = if supported_layers
+                .iter()
+                .any(|layer| CStr::from_ptr(layer.layer_name.as_ptr()) == validation_layers)
+            {
+                [to_cstr!("VK_LAYER_KHRONOS_validation")]
+            } else {
+                [to_cstr!("")]
+            };
+
+            let enabled_layers_raw: Vec<_> =
+                enabled_layers.iter().map(|layer| layer.as_ptr()).collect();
+            /*
+                        if enabled_layers.{
+                        } else {
+                            return Err("Validation layers requested but are not supported");
+                        };
+            */
+            let mut create_info = vk::InstanceCreateInfo::builder()
+                .application_info(&app_info)
+                .enabled_extension_names(&surface_extensions_raw)
+                .enabled_layer_names(&enabled_layers_raw);
+
+            let mut debug_utils_messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
+                .message_severity(
+                    vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+                        | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                        | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+                )
+                .message_type(
+                    vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                        | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                        | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                )
+                .pfn_user_callback(Some(vulkan_debug_callback))
+                .user_data(std::ptr::null_mut());
+            if debug_enabled {
+                create_info = create_info.push_next(&mut debug_utils_messenger_info);
+            }
+
+            let instance = entry.create_instance(&create_info, None).unwrap();
+
+            let debug_utils;
+            let debug_messenger;
+            if debug_enabled {
+                let utils = DebugUtils::new(&entry, &instance);
+                debug_messenger = utils
+                    .create_debug_utils_messenger(&debug_utils_messenger_info, None)
+                    .unwrap();
+                debug_utils = Some(utils);
+            } else {
+                debug_utils = None;
+                debug_messenger = vk::DebugUtilsMessengerEXT::null();
+            }
+
+            // Physical device
+            let surface = ash_window::create_surface(&entry, &instance, window, None).unwrap();
+            let surface_loader = Surface::new(&entry, &instance);
+            // FIXME: Only selects for graphics queues that also support the surface/present
+            let (physical_device, queue_family_index) = instance
+                .enumerate_physical_devices()
+                .unwrap()
+                .iter()
+                .map(|device| {
+                    instance
+                        .get_physical_device_queue_family_properties(*device)
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, ref info)| {
+                            let supports_graphics_and_surface =
+                                info.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                                    && surface_loader
+                                        .get_physical_device_surface_support(
+                                            *device,
+                                            index as u32,
+                                            surface,
+                                        )
+                                        .unwrap();
+                            if supports_graphics_and_surface {
+                                Some((*device, index))
+                            } else {
+                                None
+                            }
+                        })
+                        .next()
+                })
+                .filter_map(|v| v)
+                .next()
+                .unwrap();
+        }
     }
 }
 
