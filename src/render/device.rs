@@ -1,7 +1,7 @@
 use ash::version::{DeviceV1_0, InstanceV1_0};
 use ash::vk;
 
-use super::vk_core::VkCore;
+use super::core::Core;
 
 use std::ffi::CStr;
 
@@ -28,12 +28,12 @@ pub struct Device {
 
 impl Device {
     pub fn new(
-        core: &VkCore,
+        core: &Core,
         physical_device: vk::PhysicalDevice,
         device_extensions: Vec<*const i8>,
         device_features: vk::PhysicalDeviceFeatures,
         queue_types: vk::QueueFlags,
-    ) -> Device {
+    ) -> Self {
         unsafe {
             let queue_family_properties = core
                 .instance
@@ -136,7 +136,7 @@ impl Device {
             let command_pool = logical_device
                 .create_command_pool(&command_pool_info, None)
                 .unwrap();
-                
+
             Device {
                 physical_device,
                 logical_device,

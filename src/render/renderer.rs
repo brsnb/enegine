@@ -31,12 +31,6 @@ pub struct UniformBufferObject {
     pub proj: Mat4,
 }
 
-// FIXME
-pub struct RenameMe {
-    pub core: VkCore,
-    pub device: Device,
-}
-
 pub struct Renderer {
     entry: ash::Entry,
     instance: ash::Instance,

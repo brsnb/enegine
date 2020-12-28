@@ -1,13 +1,13 @@
 use ash::extensions::khr;
 use ash::vk;
 
-use super::{renderer, window};
+use super::{core, window};
 
 pub struct Swapchain {
-    core: renderer::Core,
+    core: core::Core,
     window: window::Window,
 
-    swapchain_fn: khr::Swapchain,
+    swapchain_pfn: khr::Swapchain,
     swapchain: vk::SurfaceKHR,
     surface_format: vk::Format,
 
@@ -17,7 +17,7 @@ pub struct Swapchain {
 }
 
 impl Swapchain {
-    pub fn new(core: &renderer::Core, window: &window::Window) -> Result<Self, &'static str> {
+    pub fn new(core: &core::Core, window: &window::Window) -> Result<Self, &'static str> {
         unsafe {
             // Swapchain
             let surface_caps = window

@@ -5,7 +5,7 @@ use ash::vk;
 use std::borrow::Cow;
 use std::ffi::CStr;
 
-pub struct VkCore {
+pub struct Core {
     pub entry: ash::Entry,
     pub instance: ash::Instance,
 
@@ -14,8 +14,8 @@ pub struct VkCore {
     debug_messenger: vk::DebugUtilsMessengerEXT,
 }
 
-impl VkCore {
-    fn new(window: &winit::window::Window) -> Self {
+impl Core {
+    pub fn new(window: &winit::window::Window) -> Self {
         let entry = ash::Entry::new().unwrap();
 
         unsafe {
@@ -108,7 +108,7 @@ impl VkCore {
                 debug_messenger = vk::DebugUtilsMessengerEXT::null();
             }
 
-            VkCore {
+            Core {
                 entry,
                 instance,
                 debug_utils,
@@ -118,7 +118,7 @@ impl VkCore {
     }
 }
 
-impl Drop for VkCore {
+impl Drop for Core {
     // TODO: Implement
     fn drop(&mut self) {}
 }

@@ -2,5 +2,6 @@ pub mod renderer;
 
 mod device;
 mod swapchain;
-mod vk_core;
+mod core;
 mod window;
+mod rename;
