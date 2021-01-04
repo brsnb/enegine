@@ -1,15 +1,18 @@
 use ash::extensions::khr;
+use ash::version::DeviceV1_0;
 use ash::vk;
+use winit::window;
 
-use super::{core, window};
+use super::{core, device};
 
 pub struct Swapchain {
-    core: core::Core,
-    window: window::Window,
+    surface_pfn: khr::Surface,
+    surface: vk::SurfaceKHR,
+    surface_format: vk::Format,
+    surface_extent: vk::Extent2D,
 
     swapchain_pfn: khr::Swapchain,
-    swapchain: vk::SurfaceKHR,
-    surface_format: vk::Format,
+    swapchain: vk::SwapchainKHR,
 
     image_count: u32,
     images: Vec<vk::Image>,
@@ -17,27 +20,36 @@ pub struct Swapchain {
 }
 
 impl Swapchain {
-    pub fn new(core: &core::Core, window: &window::Window) -> Result<Self, &'static str> {
+    pub fn new(
+        core: &core::Core,
+        device: &device::Device,
+        window: &window::Window,
+    ) -> Result<Self, &'static str> {
         unsafe {
+            // Surface
+            let surface_pfn = khr::Surface::new(&core.entry, &core.instance);
+            let surface = ash_window::create_surface(&core.entry, &core.instance, window, None)
+                .expect("Could not create surface");
+
             // Swapchain
-            let surface_caps = window
-                .surface_fn
-                .get_physical_device_surface_capabilities(core.physical_device, window.surface)
+            let surface_caps = surface_pfn
+                .get_physical_device_surface_capabilities(device.physical_device, surface)
                 .unwrap();
             // FIXME: Bad, reliant on window and doesn't have dpi scaling
             //        use surface_caps.min_image_height/width???
             let surface_extent = match surface_caps.current_extent.width {
                 std::u32::MAX => vk::Extent2D {
-                    width: window.window.inner_size().width,
-                    height: window.window.inner_size().height,
+                    width: window.inner_size().width,
+                    height: window.inner_size().height,
                 },
                 _ => surface_caps.current_extent,
             };
 
-            let surface_formats = window
-                .surface_fn
-                .get_physical_device_surface_formats(core.physical_device, window.surface)
+            let surface_formats = surface_pfn
+                .get_physical_device_surface_formats(device.physical_device, surface)
                 .unwrap();
+
+            // FIXME
             let surface_format = *surface_formats
                 .iter()
                 .find(|&f| {
@@ -46,9 +58,8 @@ impl Swapchain {
                 })
                 .unwrap_or(&surface_formats[0]);
 
-            let present_modes = window
-                .surface_fn
-                .get_physical_device_surface_present_modes(core.physical_device, window.surface)
+            let present_modes = surface_pfn
+                .get_physical_device_surface_present_modes(device.physical_device, surface)
                 .unwrap();
             let present_mode = *present_modes
                 .iter()
@@ -60,10 +71,10 @@ impl Swapchain {
                 image_count = surface_caps.max_image_count;
             };
 
-            let swapchain_fn = khr::Swapchain::new(&core.instance, &core.device);
+            let swapchain_pfn = khr::Swapchain::new(&core.instance, &device.logical_device);
 
             let swapchain_create_info = vk::SwapchainCreateInfoKHR::builder()
-                .surface(window.surface)
+                .surface(surface)
                 .min_image_count(image_count)
                 .image_format(surface_format.format)
                 .image_color_space(surface_format.color_space)
@@ -76,11 +87,11 @@ impl Swapchain {
                 .present_mode(present_mode)
                 .clipped(true);
 
-            let swapchain = swapchain_fn
+            let swapchain = swapchain_pfn
                 .create_swapchain(&swapchain_create_info, None)
                 .unwrap();
 
-            let images = swapchain_fn.get_swapchain_images(swapchain).unwrap();
+            let images = swapchain_pfn.get_swapchain_images(swapchain).unwrap();
 
             let image_views: Vec<vk::ImageView> = images
                 .iter()
@@ -102,18 +113,20 @@ impl Swapchain {
                             base_array_layer: 0,
                             layer_count: 1,
                         });
-                    core.device.create_image_view(&image_view, None).unwrap()
+                    device
+                        .logical_device
+                        .create_image_view(&image_view, None)
+                        .unwrap()
                 })
                 .collect();
 
             Ok(Swapchain {
-                core,
-                window,
-
-                swapchain_fn,
+                surface_pfn,
+                surface,
+                surface_extent,
+                surface_format: surface_format.format,
+                swapchain_pfn,
                 swapchain,
-                surface_format,
-
                 image_count,
                 images,
                 image_views,

@@ -1,6 +1,6 @@
 use ash::extensions::{
     ext::DebugUtils,
-    khr::{Surface, Swapchain},
+    khr,
 };
 use ash::{util, vk};
 use ash_window;
@@ -13,7 +13,8 @@ use glam::{Mat4, Vec2, Vec3};
 
 use super::{
     core::Core,
-    device::{self, Device},
+    device::Device,
+    swapchain::Swapchain,
     renderer,
 };
 
@@ -23,6 +24,7 @@ use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
 pub struct Rename {
     pub core: Core,
     pub device: Device,
+    pub swapchain: Swapchain,
 }
 
 impl Rename {
@@ -33,7 +35,7 @@ impl Rename {
             // FIXME: SURFACE
             let surface = ash_window::create_surface(&core.entry, &core.instance, window, None)
                 .expect("Could not create surface");
-            let surface_pfn = Surface::new(&core.entry, &core.instance);
+            let surface_pfn = khr::Surface::new(&core.entry, &core.instance);
 
             // Physical device selection
             let physical_devices = core
