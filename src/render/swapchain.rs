@@ -133,4 +133,8 @@ impl Swapchain {
             })
         }
     }
+
+    pub unsafe fn acquire_next_image(&self, sem: vk::Semaphore) -> Result<(u32, bool), vk::Result> {
+        self.swapchain_pfn.acquire_next_image(self.swapchain, u64::MAX, sem, vk::Fence::null())
+    }
 }
