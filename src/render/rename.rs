@@ -63,7 +63,9 @@ impl Rename {
             // Swapchain
             let swapchain = swapchain::Swapchain::new(&core, &device, window).unwrap();
 
-            Rename { core, device }
+            
+
+            Rename { core, device, swapchain }
         }
     }
 }

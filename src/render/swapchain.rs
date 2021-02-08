@@ -1,3 +1,5 @@
+use std::unimplemented;
+
 use ash::extensions::khr;
 use ash::version::DeviceV1_0;
 use ash::vk;
@@ -135,6 +137,11 @@ impl Swapchain {
     }
 
     pub unsafe fn acquire_next_image(&self, sem: vk::Semaphore) -> Result<(u32, bool), vk::Result> {
-        self.swapchain_pfn.acquire_next_image(self.swapchain, u64::MAX, sem, vk::Fence::null())
+        self.swapchain_pfn
+            .acquire_next_image(self.swapchain, u64::MAX, sem, vk::Fence::null())
+    }
+
+    pub unsafe fn queue_present(&self) {
+        unimplemented!()
     }
 }
