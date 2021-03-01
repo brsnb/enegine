@@ -8,10 +8,10 @@ use winit::window;
 use super::{core, device};
 
 pub struct Swapchain {
-    surface_pfn: khr::Surface,
-    surface: vk::SurfaceKHR,
-    surface_format: vk::Format,
-    surface_extent: vk::Extent2D,
+    pub surface_pfn: khr::Surface,
+    pub surface: vk::SurfaceKHR,
+    pub surface_format: vk::Format,
+    pub surface_extent: vk::Extent2D,
 
     swapchain_pfn: khr::Swapchain,
     swapchain: vk::SwapchainKHR,
