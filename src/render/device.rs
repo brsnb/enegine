@@ -1,9 +1,16 @@
-use ash::version::{DeviceV1_0, InstanceV1_0};
+use ash::{version::{DeviceV1_0, InstanceV1_0}, vk::SharingMode};
 use ash::vk;
+use vk_mem;
 
 use super::core::Core;
 
 use std::ffi::CStr;
+
+pub struct Buffer {
+    pub handle: vk::Buffer,
+    pub memory: vk_mem::Allocation,
+    pub info: vk_mem::AllocationInfo,
+}
 
 // Deal with non-distinct compute/transfer queues elsewhere
 #[derive(Default)]
@@ -24,6 +31,7 @@ pub struct Device {
     pub command_pool: vk::CommandPool,
     pub queue_family_properties: Vec<vk::QueueFamilyProperties>,
     pub queue_family_indices: QueueFamilyIndices,
+    pub allocator: vk_mem::Allocator,
 }
 
 impl Device {
@@ -137,6 +145,17 @@ impl Device {
                 .create_command_pool(&command_pool_info, None)
                 .unwrap();
 
+            // Allocator
+            let allocator_create_info = vk_mem::AllocatorCreateInfo {
+                physical_device,
+                device: logical_device,
+                instance: core.instance,
+                flags: vk_mem::AllocatorCreateFlags::NONE,
+                ..Default::default()
+            };
+
+            let allocator = vk_mem::Allocator::new(&allocator_create_info).unwrap();
+
             Device {
                 physical_device,
                 logical_device,
@@ -148,8 +167,40 @@ impl Device {
                 command_pool,
                 queue_family_properties,
                 queue_family_indices,
+                allocator,
             }
         }
+    }
+
+    pub fn create_buffer(
+        &self,
+        usage: vk::BufferUsageFlags,
+        properties: vk_mem::MemoryUsage,
+        size: vk::DeviceSize,
+    ) -> Option<Buffer> {
+        let buffer_info = vk::BufferCreateInfo {
+            size,
+            usage,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            ..Default::default()
+        };
+
+        let allocation_info = vk_mem::AllocationCreateInfo {
+            usage: properties,
+            ..Default::default()
+        };
+
+        let alloc = self.allocator.create_buffer(&buffer_info, &allocation_info).unwrap(); // FIXME
+        
+        Some(Buffer {
+            handle: alloc.0,
+            memory: alloc.1,
+            info: alloc.2,
+        })
+    }
+
+    pub fn destroy_buffer(&self, buffer: Buffer) {
+        self.allocator.destroy_buffer(buffer.handle, &buffer.memory).unwrap();
     }
 
     fn get_queue_family_idx(

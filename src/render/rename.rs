@@ -11,6 +11,7 @@ use std::mem;
 use glam::{Mat4, Vec2, Vec3};
 
 use super::{core, device, renderer, swapchain};
+use super::device::Buffer;
 
 use ash::version::{DeviceV1_0, EntryV1_0, InstanceV1_0};
 
@@ -21,11 +22,11 @@ pub struct Renderer {
     swapchain: swapchain::Swapchain,
 
     render_pass: vk::RenderPass,
-    pipeline: vk::Pipeline,
+    pipelines: Vec<vk::Pipeline>,
 
-    descriptor_pool: vk::DescriptorPool,
-    descriptor_sets: Vec<vk::DescriptorSet>,
-    descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
+    //descriptor_pool: vk::DescriptorPool,
+    //descriptor_sets: Vec<vk::DescriptorSet>,
+    //descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
 }
 
 impl Renderer {
@@ -354,7 +355,7 @@ impl Renderer {
                 .subpass(0)
                 .build()];
 
-            let pipeline = device
+            let pipelines = device
                 .logical_device
                 .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
                 .unwrap();
@@ -362,13 +363,16 @@ impl Renderer {
             device.logical_device.destroy_shader_module(vs_module, None);
             device.logical_device.destroy_shader_module(fs_module, None);
 
+            let buf_size = (mem::size_of::<Vertex>()) as u64;
+            let vertbuf = device.create_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, vk_mem::MemoryUsage::GpuOnly, buf_size).unwrap();
+            let mut align = ash::util::Align::new(vertbuf.handle.)
+
             Renderer {
                 core,
                 device,
                 swapchain,
                 render_pass,
-                descriptor_sets,
-                pipeline,
+                pipelines,
             }
         }
     }
