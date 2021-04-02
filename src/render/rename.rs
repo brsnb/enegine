@@ -365,7 +365,8 @@ impl Renderer {
 
             let buf_size = (mem::size_of::<Vertex>()) as u64;
             let vertbuf = device.create_buffer(vk::BufferUsageFlags::VERTEX_BUFFER, vk_mem::MemoryUsage::GpuOnly, buf_size).unwrap();
-            let mut align = ash::util::Align::new(vertbuf.handle.)
+            let data = device.allocator.map_memory(&vertbuf.memory).unwrap();
+            let mut align = ash::util::Align::<Vertex>::new(data as *mut std::ffi::c_void, mem::align_of::<Vertex>() as u64, buf_size);
 
             Renderer {
                 core,
