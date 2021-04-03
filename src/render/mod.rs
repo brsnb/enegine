@@ -1,7 +1,8 @@
 pub mod renderer;
 
-mod device;
-mod swapchain;
 mod core;
-mod window;
+mod device;
+mod model;
 mod rename;
+mod swapchain;
+mod window;
