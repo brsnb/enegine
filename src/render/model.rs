@@ -1,10 +1,29 @@
+use ash::vk;
 use ultraviolet as uv;
 
-struct Vertex {
-    position: uv::Vec3,
-    normal: uv::Vec3,
-    uv_0: uv::Vec2,
-    uv_1: uv::Vec2,
+pub struct Vertex {
+    pub position: uv::Vec3,
+    pub normal: uv::Vec3,
+    pub uv_0: uv::Vec2,
+    pub uv_1: uv::Vec2,
+}
+
+struct SamplerAddressModes {
+    pub u: vk::SamplerAddressMode,
+    pub v: vk::SamplerAddressMode,
+    pub w:vk::SamplerAddressMode,
+}
+
+struct TextureSampler {
+    pub mag_filter: vk::Filter,
+    pub min_filter: vk::Filter,
+    pub address_modes: SamplerAddressModes,
+}
+
+struct Texture {
+    image: vk::Image,
+    image_layout: vk::ImageLayout,
+    
 }
 
 struct Model {

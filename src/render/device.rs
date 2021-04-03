@@ -12,6 +12,12 @@ pub struct Buffer {
     pub info: vk_mem::AllocationInfo,
 }
 
+pub struct Image {
+    pub handle: vk::Image,
+    pub memory: vk_mem::Allocation,
+    pub info: vk_mem::AllocationInfo,
+}
+
 // Deal with non-distinct compute/transfer queues elsewhere
 #[derive(Default)]
 pub struct QueueFamilyIndices {
@@ -197,6 +203,12 @@ impl Device {
             memory: alloc.1,
             info: alloc.2,
         })
+    }
+
+    pub fn create_image(&self, width: u32, height) {
+        let image_info = vk::ImageCreateInfo {
+
+        }
     }
 
     pub fn destroy_buffer(&self, buffer: Buffer) {
