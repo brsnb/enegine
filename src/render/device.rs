@@ -1,5 +1,8 @@
-use ash::{version::{DeviceV1_0, InstanceV1_0}, vk::SharingMode};
 use ash::vk;
+use ash::{
+    version::{DeviceV1_0, InstanceV1_0},
+    vk::SharingMode,
+};
 use vk_mem;
 
 use super::core::Core;
@@ -180,24 +183,19 @@ impl Device {
 
     pub fn create_buffer(
         &self,
-        usage: vk::BufferUsageFlags,
+        buffer_info: vk::BufferCreateInfo,
         properties: vk_mem::MemoryUsage,
-        size: vk::DeviceSize,
     ) -> Option<Buffer> {
-        let buffer_info = vk::BufferCreateInfo {
-            size,
-            usage,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
-            ..Default::default()
-        };
-
         let allocation_info = vk_mem::AllocationCreateInfo {
             usage: properties,
             ..Default::default()
         };
 
-        let alloc = self.allocator.create_buffer(&buffer_info, &allocation_info).unwrap(); // FIXME
-        
+        let alloc = self
+            .allocator
+            .create_buffer(&buffer_info, &allocation_info)
+            .unwrap(); // FIXME
+
         Some(Buffer {
             handle: alloc.0,
             memory: alloc.1,
@@ -205,14 +203,38 @@ impl Device {
         })
     }
 
-    pub fn create_image(&self, width: u32, height) {
-        let image_info = vk::ImageCreateInfo {
+    pub fn create_image(
+        &self,
+        image_info: &vk::ImageCreateInfo,
+        properties: vk_mem::MemoryUsage,
+    ) -> Option<Image> {
+        let allocation_info = vk_mem::AllocationCreateInfo {
+            usage: properties,
+            ..Default::default()
+        };
 
-        }
+        let alloc = self
+            .allocator
+            .create_image(image_info, &allocation_info)
+            .unwrap(); // FIXME
+
+        Some(Image {
+            handle: alloc.0,
+            memory: alloc.1,
+            info: alloc.2,
+        })
     }
 
     pub fn destroy_buffer(&self, buffer: Buffer) {
-        self.allocator.destroy_buffer(buffer.handle, &buffer.memory).unwrap();
+        self.allocator
+            .destroy_buffer(buffer.handle, &buffer.memory)
+            .unwrap();
+    }
+
+    pub fn desroy_image(&self, image: Image) {
+        self.allocator
+            .destroy_image(image.handle, &image.memory)
+            .unwrap();
     }
 
     fn get_queue_family_idx(

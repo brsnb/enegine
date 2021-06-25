@@ -145,3 +145,11 @@ impl Swapchain {
         unimplemented!()
     }
 }
+
+// TODO
+pub struct Frame {
+    color: vk::Image,
+    color_view: vk::ImageView,
+    depth: vk::Image,
+    depth_view: vk::ImageView,
+}
